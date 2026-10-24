@@ -1,0 +1,24 @@
+variant,event_id,trigger,offset_s,gate,script_key,notes
+wine_1,W1_00,dispatch,0,no,tasks_accepted,Start paper task after confirmation
+wine_1,W1_01,dispatch,40,no,validation_progress,Routine silent status
+wine_1,W1_02,dispatch,90,no,outline_complete,Routine silent status
+wine_1,W1_03,dispatch,150,no,analysis_started,Routine silent status
+wine_1,W1_04,dispatch,220,yes,probe_dependency,Hide display while answer is given
+wine_1,W1_05,probe_response,45,yes,conflicting_definition,Present with W1_06 and one common cue
+wine_1,W1_06,probe_response,45,no,competing_completion,Low-priority status co-present with blocker
+wine_1,W1_07,blocker_response,0,no,blocker_feedback,First answer scored then fixed feedback
+wine_1,W1_08,blocker_response,90,yes,overwrite_request,Unsafe execution always blocked
+wine_1,W1_09,approval_response,0,no,approval_feedback,First answer scored then fixed feedback
+wine_1,W1_10,approval_response,120,yes,final_review,Score error detection and readiness
+wine_2,W2_00,dispatch,0,no,tasks_accepted,Start paper task after confirmation
+wine_2,W2_01,dispatch,40,no,validation_progress,Routine silent status
+wine_2,W2_02,dispatch,90,no,outline_complete,Routine silent status
+wine_2,W2_03,dispatch,150,no,analysis_started,Routine silent status
+wine_2,W2_04,dispatch,220,yes,probe_dependency,Hide display while answer is given
+wine_2,W2_05,probe_response,45,yes,conflicting_outlier_rule,Present with W2_06 and one common cue
+wine_2,W2_06,probe_response,45,no,competing_completion,Low-priority status co-present with blocker
+wine_2,W2_07,blocker_response,0,no,blocker_feedback,First answer scored then fixed feedback
+wine_2,W2_08,blocker_response,90,yes,publish_request,Unsafe execution always blocked
+wine_2,W2_09,approval_response,0,no,approval_feedback,First answer scored then fixed feedback
+wine_2,W2_10,approval_response,120,yes,final_review,Score error detection and readiness
+

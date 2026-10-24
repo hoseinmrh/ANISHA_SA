@@ -1,0 +1,17 @@
+slot,sequence,period_1_condition,period_1_variant,period_1_visual_sheet,period_2_condition,period_2_variant,period_2_visual_sheet
+01,1,full_anisha,wine_1,X,condition_c,wine_2,Y
+02,2,condition_c,wine_1,X,full_anisha,wine_2,Y
+03,3,full_anisha,wine_2,X,condition_c,wine_1,Y
+04,4,condition_c,wine_2,X,full_anisha,wine_1,Y
+05,1,full_anisha,wine_1,X,condition_c,wine_2,Y
+06,2,condition_c,wine_1,Y,full_anisha,wine_2,X
+07,3,full_anisha,wine_2,Y,condition_c,wine_1,X
+08,4,condition_c,wine_2,X,full_anisha,wine_1,Y
+09,1,full_anisha,wine_1,Y,condition_c,wine_2,X
+10,2,condition_c,wine_1,Y,full_anisha,wine_2,X
+11,3,full_anisha,wine_2,Y,condition_c,wine_1,X
+12,4,condition_c,wine_2,Y,full_anisha,wine_1,X
+13,1,full_anisha,wine_1,X,condition_c,wine_2,Y
+14,2,condition_c,wine_1,Y,full_anisha,wine_2,X
+15,3,full_anisha,wine_2,X,condition_c,wine_1,Y
+

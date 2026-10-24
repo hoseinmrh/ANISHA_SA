@@ -1,0 +1,111 @@
+{
+  "brief": {
+    "project_id": "red-wine-quality",
+    "title": "Red Wine Quality Classification",
+    "purpose": "Build and compare machine-learning classifiers that predict red-wine quality from the supplied physicochemical dataset, then write a grounded university-project report.",
+    "current_focus": "Prepare reproducible exploratory data analysis before choosing the label and evaluation strategy.",
+    "recent_progress": [
+      "Registered the supplied red-wine dataset.",
+      "Inspected its row count, schema, missing cells, target values, and checksum."
+    ],
+    "key_constraints": [
+      "Use ml_project/winequality-red.csv as the project dataset.",
+      "Treat quality prediction as a classification problem.",
+      "Do not claim model results unless they come from recorded reproducible runs."
+    ],
+    "open_questions": [
+      "Should quality remain a six-class target or be grouped into broader quality bands?",
+      "Which split strategy and imbalance-aware metrics should be used for model comparison?"
+    ],
+    "next_actions": [
+      "Run exploratory data analysis and record its artefacts.",
+      "Propose the label, split, preprocessing, baseline, and evaluation strategy for user confirmation."
+    ],
+    "memory_refs": [
+      "memory-wine-goal",
+      "memory-wine-dataset",
+      "memory-wine-initial-inspection"
+    ],
+    "generated_at": "2026-10-07T15:30:00Z"
+  },
+  "memories": [
+    {
+      "memory_id": "memory-wine-goal",
+      "project_id": "red-wine-quality",
+      "kind": "fact",
+      "content": "The project goal is to compare machine-learning classifiers for red-wine quality and produce a report grounded in the recorded analysis and model runs.",
+      "source_refs": [
+        {
+          "uri": "file://ml_project/README.md",
+          "source_type": "project_brief",
+          "authority": "user_confirmed",
+          "version": "2026-10-07"
+        }
+      ],
+      "created_by": "orchestrator",
+      "captured_at": "2026-10-07T15:30:00Z",
+      "status": "active",
+      "importance": 1.0,
+      "confidence": 1.0,
+      "sensitivity": "project",
+      "allowed_agents": [
+        "coding_agent",
+        "writing_agent",
+        "research_agent"
+      ],
+      "tags": ["goal", "classification", "report"]
+    },
+    {
+      "memory_id": "memory-wine-dataset",
+      "project_id": "red-wine-quality",
+      "kind": "fact",
+      "content": "The dataset is ml_project/winequality-red.csv with 1,599 rows, 11 numeric predictor columns, and the target column quality.",
+      "source_refs": [
+        {
+          "uri": "file://ml_project/winequality-red.csv",
+          "source_type": "dataset",
+          "authority": "workspace_record",
+          "version": "sha256:d6a0d9bd24806944818795f22500c46cb6424cbff517aacda36595d3ed9b2daa"
+        }
+      ],
+      "created_by": "orchestrator",
+      "captured_at": "2026-10-07T15:30:00Z",
+      "status": "active",
+      "importance": 0.95,
+      "confidence": 1.0,
+      "sensitivity": "project",
+      "allowed_agents": [
+        "coding_agent",
+        "writing_agent",
+        "research_agent"
+      ],
+      "tags": ["dataset", "schema", "target"]
+    },
+    {
+      "memory_id": "memory-wine-initial-inspection",
+      "project_id": "red-wine-quality",
+      "kind": "episode",
+      "content": "The initial inspection found no blank cells and target counts of 3:10, 4:53, 5:681, 6:638, 7:199, and 8:18; label grouping remains an open post-EDA decision.",
+      "source_refs": [
+        {
+          "uri": "file://ml_project/winequality-red.csv",
+          "source_type": "dataset_inspection",
+          "authority": "workspace_record",
+          "version": "sha256:d6a0d9bd24806944818795f22500c46cb6424cbff517aacda36595d3ed9b2daa"
+        }
+      ],
+      "created_by": "orchestrator",
+      "captured_at": "2026-10-07T15:30:00Z",
+      "status": "active",
+      "importance": 0.85,
+      "confidence": 1.0,
+      "sensitivity": "project",
+      "allowed_agents": [
+        "coding_agent",
+        "writing_agent",
+        "research_agent"
+      ],
+      "tags": ["eda", "class-imbalance", "open-decision"]
+    }
+  ]
+}
