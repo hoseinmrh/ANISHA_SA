@@ -8,7 +8,7 @@ This is the independent, two-screen phone interface for the thesis comparison. C
 - Both agent briefings use the same English `faster-whisper` speech service and model setting (`ANISHA_WHISPER_MODEL`, default `small`) as ANISHA. The participant reviews or edits each transcript and the proposed goal before confirming. The frozen runner starts only after both confirmations, in either order.
 - After briefing, each agent tab has a microphone for status, evidence, and pending-decision questions. It uses ANISHA's copied Whisper recognizer and exact `IntentExtractor` prompt/model setting (`OPENAI_MODEL`, default `gpt-5.6-luna`). Speech stays with the selected agent; a request explicitly targeting the other agent asks the participant to switch tabs. The recognized transcript can be edited and resubmitted. Spoken choices can suggest an on-screen option but never save it.
 - The copied frozen scenario, trace, final artefacts, and counterbalancing file are local to this future Git repository. An adapted copy of the ANISHA study runner controls task state, event timing, source release, feedback, decisions, corrections, and safety. Every participant action stays in SQLite; no live Coding or Writing executor is called.
-- Separate feeds expose all released events for that agent. The shared blocker/routine pair gets one cue; each item can be opened in either order. Source and event opens, tab switches, cue delivery, first answers, corrections, and speech attempts are logged. The researcher can export the trial as JSON.
+- Each agent has a dark conversation screen. Generated documents and decision controls remain in the chat; an openable Context panel holds the project brief and released reference notes, while Activity holds that agent's full chronological trace. The shared blocker/routine pair gets one cue; each item can be opened in either order. Context/Activity access, source and event opens, tab switches, cue delivery, first answers, corrections, and speech attempts are logged. The researcher can export the trial as JSON.
 - At the masked state probe, the screen turns black. The researcher records the participant's verbatim response from `/`, then the trial resumes.
 
 ## Run locally
@@ -48,6 +48,7 @@ Run the backend flow check with:
 
 ```sh
 python -B -m unittest discover -s backend/tests -v
+node --test frontend/tests/chat_layout.test.js
 python -B scripts/check_material_parity.py
 python -B scripts/check_agent_parity.py
 ```

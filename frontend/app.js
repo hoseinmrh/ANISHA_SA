@@ -5,6 +5,7 @@ const agents = Object.keys(agentNames);
 let token = '';
 let state = null;
 let selected = '';
+let detailPanel = '';
 let error = '';
 let busy = false;
 let loggingFailed = false;
@@ -104,6 +105,7 @@ async function announceCues(next) {
 function selectAgent(agent) {
   if (recording || busy) return;
   selected = agent;
+  detailPanel = '';
   sessionStorage.setItem(`separate-agent:${trialId}`, agent);
   void interact('agent_switch', agent, 'agent_tabs');
   render();
@@ -122,21 +124,36 @@ function recordOwner(record) {
   return null;
 }
 
-function renderSources(agent) {
-  const records = state.records.filter((record) => recordOwner(record) === null || recordOwner(record) === agent);
-  return `<section class="card" id="sources"><h2>Evidence and artefacts</h2><p class="muted small">Source titles include their dates and authority. Open each item to inspect it.</p>${records.map((record) => {
+function renderContext() {
+  const records = state.records.filter((record) => recordOwner(record) === null);
+  return `<section class="context-section"><p class="label">Original request</p><p class="context-brief">${esc(state.participant_brief)}</p></section>
+    <section class="context-section"><h3>Reference notes and instructions</h3><p class="small muted">Open a note to read its full text, date, and authority.</p>${records.map((record) => {
+      const isOpen = openedRecords.has(record.record_id);
+      return `<div class="source"><button type="button" data-action="source" data-id="${esc(record.record_id)}" aria-expanded="${isOpen}"><span>${esc(sourceLabel(record))}</span><small>${esc(record.title)}</small><span class="source-toggle" aria-hidden="true">${isOpen ? '−' : '+'}</span></button>${isOpen ? `<p>${esc(record.text)}</p>` : ''}</div>`;
+    }).join('')}</section>`;
+}
+
+function renderOutputs(agent) {
+  const records = state.records.filter((record) => recordOwner(record) === agent);
+  if (!records.length) return '';
+  return `<section class="output-thread" id="outputs" aria-label="${agentNames[agent]} documents">${records.map((record) => {
     const isOpen = openedRecords.has(record.record_id);
-    const title = `${record.record_id === 'common-instruction' ? 'Study instructions' : sourceLabel(record)} · ${record.title}`;
     const filename = record.kind === 'code_artifact' ? 'analysis.py' : record.kind === 'markdown_artifact' ? 'report.md' : '';
-    return `<div class="source"><button type="button" data-action="source" data-id="${esc(record.record_id)}" aria-expanded="${isOpen}">${esc(title)} ${isOpen ? '−' : '+'}</button>${isOpen ? `${isFinalFile(record) ? `<pre>${esc(record.text)}</pre><a download="${filename}" href="data:${record.kind === 'code_artifact' ? 'text/x-python' : 'text/markdown'};charset=utf-8,${encodeURIComponent(record.text)}">Download ${filename}</a>` : `<p>${esc(record.text)}</p>`}` : ''}</div>`;
+    const preview = record.text.length > 180 ? `${record.text.slice(0, 180)}…` : record.text;
+    return `<div class="message message-agent"><span class="avatar" aria-hidden="true">${agentNames[agent][0]}</span><div class="bubble output-bubble"><div class="message-meta"><strong>${agentNames[agent]}</strong><span>${isFinalFile(record) ? 'Created file' : 'Working document'}</span></div><h3>${esc(record.title)}</h3><p class="output-preview">${esc(preview)}</p><button type="button" class="button secondary" data-action="source" data-id="${esc(record.record_id)}" aria-expanded="${isOpen}">${isOpen ? 'Hide document' : 'Open document'}</button>${isOpen ? `<div class="output-full"><pre>${esc(record.text)}</pre>${filename ? `<a download="${filename}" href="data:${record.kind === 'code_artifact' ? 'text/x-python' : 'text/markdown'};charset=utf-8,${encodeURIComponent(record.text)}">Download ${filename}</a>` : ''}</div>` : ''}</div></div>`;
   }).join('')}</section>`;
+}
+
+function renderDetailsPanel(agent) {
+  if (!detailPanel) return '';
+  return `<div class="details-overlay"><button type="button" class="details-scrim" data-action="close-details" aria-label="Close details"></button><aside class="details-sheet" role="dialog" aria-modal="true" aria-label="Project details"><header class="details-header"><div><p class="label">${agentNames[agent]} workspace</p><h2>Details</h2></div><button type="button" class="details-close" data-action="close-details" aria-label="Close details">×</button></header><nav class="details-tabs" aria-label="Detail sections"><button type="button" data-action="details" data-panel="context" aria-current="${detailPanel === 'context'}">Context</button><button type="button" data-action="details" data-panel="activity" aria-current="${detailPanel === 'activity'}">Activity</button></nav><div class="details-body">${detailPanel === 'context' ? renderContext() : renderFeed(agent)}</div></aside></div>`;
 }
 
 function renderFeed(agent) {
   const events = state.events.filter((event) => agentForEvent(event) === agent);
   const latest = events.at(-1);
   const latestLine = latest ? (latest.cue_id && !openedEvents.has(latest.event_id) ? 'New update available in activity.' : latest.text) : 'No activity yet.';
-  return `<section class="conversation" aria-label="${agentNames[agent]} conversation"><div class="thread-heading"><span class="online-dot"></span><span>Activity with ${agentNames[agent]}</span><span class="thread-count">${events.length} updates</span></div><div class="status-note"><span class="label">Latest status</span><p>${esc(latestLine)}</p></div><ol class="feed">${events.length ? events.map((event) => `<li class="message message-agent"><span class="avatar" aria-hidden="true">${agentNames[agent][0]}</span><div class="bubble"><div class="message-meta"><strong>${agentNames[agent]}</strong><time datetime="${new Date(event.occurred_at_ms).toISOString()}">${shortTime(event.occurred_at_ms)}</time></div>${event.cue_id && !openedEvents.has(event.event_id) ? `<p>New update ready to open.</p><button class="button secondary" data-action="event" data-id="${esc(event.event_id)}">Open update</button>` : `<p>${esc(event.text)}</p><a href="#sources">View source records</a>`}<span class="event-id">${esc(event.event_id)}</span></div></li>`).join('') : `<li class="empty-thread">${agentNames[agent]} has not posted an update yet.</li>`}</ol></section>`;
+  return `<section class="conversation" aria-label="${agentNames[agent]} activity"><div class="thread-heading"><span class="online-dot"></span><span>Activity with ${agentNames[agent]}</span><span class="thread-count">${events.length} updates</span></div><div class="status-note"><span class="label">Latest status</span><p>${esc(latestLine)}</p></div><ol class="feed">${events.length ? events.map((event) => `<li class="message message-agent"><span class="avatar" aria-hidden="true">${agentNames[agent][0]}</span><div class="bubble"><div class="message-meta"><strong>${agentNames[agent]}</strong><time datetime="${new Date(event.occurred_at_ms).toISOString()}">${shortTime(event.occurred_at_ms)}</time></div>${event.cue_id && !openedEvents.has(event.event_id) ? `<p>New update ready to open.</p><button class="button secondary" data-action="event" data-id="${esc(event.event_id)}">Open update</button>` : `<p>${esc(event.text)}</p><button type="button" class="text-link" data-action="details" data-panel="context">Open reference notes</button>`}<span class="event-id">${esc(event.event_id)}</span></div></li>`).join('') : `<li class="empty-thread">${agentNames[agent]} has not posted an update yet.</li>`}</ol></section>`;
 }
 
 function renderBriefing(agent) {
@@ -179,7 +196,7 @@ function renderDecision(agent) {
   const suggested = followupResult[agent]?.suggested_choice_id;
   if (gateAgent === agent) {
     const title = state.phase === 'blocker' ? 'Choose a rule' : state.phase === 'approval' ? 'Review approval request' : 'Final report review';
-    output += `<section class="card"><h2>${title}</h2><p>Inspect the activity and source records before deciding.</p><a href="#sources">Open evidence and artefacts</a><div class="stack">${state.action_options.map((option) => `<label class="choice"><input name="decision" type="radio" value="${esc(option.choice_id)}" ${option.choice_id === suggested ? 'checked' : ''}>${esc(option.label)}</label>`).join('')}<label>Reason<textarea id="reason"></textarea></label>${state.phase === 'final_review' ? '<label>Exact claim needing correction<textarea id="claim"></textarea></label>' : ''}<label>Confidence (0–100)<input id="confidence" type="number" min="0" max="100"></label><button class="button" data-action="respond" ${busy || loggingFailed ? 'disabled' : ''}>Save first answer</button></div></section>`;
+    output += `<section class="card"><h2>${title}</h2><p>Inspect the activity and reference notes before deciding.</p><div class="row"><button type="button" class="text-link" data-action="details" data-panel="activity">Review activity</button><button type="button" class="text-link" data-action="details" data-panel="context">Open reference notes</button></div><div class="stack">${state.action_options.map((option) => `<label class="choice"><input name="decision" type="radio" value="${esc(option.choice_id)}" ${option.choice_id === suggested ? 'checked' : ''}>${esc(option.label)}</label>`).join('')}<label>Reason<textarea id="reason"></textarea></label>${state.phase === 'final_review' ? '<label>Exact claim needing correction<textarea id="claim"></textarea></label>' : ''}<label>Confidence (0–100)<input id="confidence" type="number" min="0" max="100"></label><button class="button" data-action="respond" ${busy || loggingFailed ? 'disabled' : ''}>Save first answer</button></div></section>`;
   }
   if (correctionAgent === agent) output += `<section class="card"><h2>Feedback and one correction</h2><p>First answer: ${esc(state.correction_previous_choice_label)}. ${esc(state.correction_previous_reason)}</p><p>See the latest feedback in the activity feed.</p><div class="stack">${state.correction_options.map((option) => `<label class="choice"><input name="correction" type="radio" value="${esc(option.choice_id)}" ${option.choice_id === suggested ? 'checked' : ''}>${esc(option.label)}</label>`).join('')}<label>Corrected reason<textarea id="correction-reason"></textarea></label><button class="button secondary" data-action="correct" ${busy || loggingFailed ? 'disabled' : ''}>Save correction</button></div></section>`;
   return output;
@@ -187,34 +204,91 @@ function renderDecision(agent) {
 
 function render() {
   if (!trialId) return renderResearcher();
-  if (state?.masked || state?.phase === 'probe') { root.innerHTML = '<div class="mask" aria-label="Screen hidden for state probe"></div>'; return; }
+  if (state?.masked || state?.phase === 'probe') { detailPanel = ''; root.innerHTML = '<div class="mask" aria-label="Screen hidden for state probe"></div>'; return; }
   if (!state) { root.innerHTML = `<main><h1>Study interface</h1>${error ? `<p class="error">${esc(error)}</p>` : '<p>Loading trial…</p>'}</main>`; return; }
   if (state.phase === 'technical_failure') { root.innerHTML = '<main><h1>Period stopped</h1><p>Return the phone to the researcher.</p></main>'; return; }
   const current = selected && agents.includes(selected) ? selected : '';
   const task = state.tasks.find((item) => item.agent_id === current);
   const agentEvents = Object.fromEntries(agents.map((agent) => [agent, state.events.filter((event) => agentForEvent(event) === agent)]));
   const badge = (agent) => agentEvents[agent].filter((event) => event.cue_id && !openedEvents.has(event.event_id)).length + (state.phase === 'blocker' && agent === 'coding_agent' || ['approval', 'final_review'].includes(state.phase) && agent === 'writing_agent' ? 1 : 0);
+  const threadContent = current && state.phase !== 'awaiting_briefing'
+    ? renderOutputs(current) + renderFollowup(current) + renderDecision(current)
+    : '';
   root.innerHTML = `<main class="participant-shell"><header class="top"><span class="brand-mark" aria-hidden="true">${current ? agentNames[current][0] : 'S'}</span><div class="brand-copy"><p class="label">${esc(state.interface_label)} · Separate Agents</p><h1 class="title">${current ? `${agentNames[current]} agent` : 'Choose an agent'}</h1></div><span class="status phase-status">${esc(state.phase.replaceAll('_', ' '))}</span></header>
     ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}${cueNotice ? `<p class="notice">${esc(cueNotice)}</p>` : ''}
-    ${!current ? `<section class="welcome-panel"><p class="label">Your conversations</p><h2>Coding and Writing</h2><p>Open an agent to brief it or review its activity.</p><div class="chooser">${agents.map((agent) => `<button class="agent-choice" data-action="select" data-agent="${agent}"><span class="avatar" aria-hidden="true">${agentNames[agent][0]}</span><span><strong>${agentNames[agent]}</strong><small>Open conversation</small></span><span class="chevron" aria-hidden="true">›</span></button>`).join('')}</div></section>` : `<nav class="tabs" aria-label="Agents">${agents.map((agent) => `<button class="tab" role="tab" aria-selected="${agent === current}" data-action="select" data-agent="${agent}" ${recording || busy ? 'disabled' : ''}><span class="tab-dot"></span>${agentNames[agent]} ${badge(agent) ? `<span class="badge">${badge(agent)}</span>` : ''}</button>`).join('')}</nav><section class="task-banner"><div><p class="label">Current task</p><h2>${task ? esc(task.goal) : `${agentNames[current]} task`}</h2>${current === 'writing_agent' && task?.depends_on ? '<p class="small muted">Results section waits for verified Coding output.</p>' : ''}</div><span class="status ${esc(task?.state || '')}">${esc(task?.state?.replaceAll('_', ' ') || (state.confirmed_agents.includes(current) ? 'briefed' : 'awaiting briefing'))}</span></section>
-    <div class="chat-content">${state.phase === 'awaiting_briefing' ? `<div class="system-message"><strong>Project brief</strong><p>${esc(state.participant_brief)}</p></div>${renderBriefing(current)}` : `${renderFeed(current)}${renderFollowup(current)}${renderDecision(current)}`}${renderSources(current)}${state.phase === 'complete' ? '<div class="system-message">Trial complete. Please return the phone to the researcher when finished.</div>' : ''}</div>
-    <p class="footer">Study interface · ${esc(state.trial_id)}</p>${renderComposer(current)}`}</main>`;
+    ${!current ? `<section class="welcome-panel"><p class="label">Your conversations</p><h2>Coding and Writing</h2><p>Open an agent to brief it or review its activity.</p><div class="chooser">${agents.map((agent) => `<button class="agent-choice" data-action="select" data-agent="${agent}"><span class="avatar" aria-hidden="true">${agentNames[agent][0]}</span><span><strong>${agentNames[agent]}</strong><small>Open conversation</small></span><span class="chevron" aria-hidden="true">›</span></button>`).join('')}</div></section>` : `<nav class="tabs" aria-label="Agents">${agents.map((agent) => `<button class="tab" role="tab" aria-selected="${agent === current}" data-action="select" data-agent="${agent}" ${recording || busy ? 'disabled' : ''}><span class="tab-dot"></span>${agentNames[agent]} ${badge(agent) ? `<span class="badge">${badge(agent)}</span>` : ''}</button>`).join('')}</nav><div class="workspace-tools"><button type="button" data-action="details" data-panel="context">Context</button><button type="button" data-action="details" data-panel="activity">Activity ${badge(current) ? `<span class="badge">${badge(current)}</span>` : ''}</button></div><section class="task-banner"><div><p class="label">Current task</p><h2>${task ? esc(task.goal) : `${agentNames[current]} task`}</h2>${current === 'writing_agent' && task?.depends_on ? '<p class="small muted">Results section waits for verified Coding output.</p>' : ''}</div><span class="status ${esc(task?.state || '')}">${esc(task?.state?.replaceAll('_', ' ') || (state.confirmed_agents.includes(current) ? 'briefed' : 'awaiting briefing'))}</span></section>
+    <div class="chat-content">${state.phase === 'awaiting_briefing' ? `<div class="system-message">Project brief and reference notes are in Context.</div>${renderBriefing(current)}` : threadContent || '<div class="system-message">No messages yet. Agent updates are in Activity.</div>'}${state.phase === 'complete' ? '<div class="system-message">Trial complete. Please return the phone to the researcher when finished.</div>' : ''}</div>
+    <p class="footer">Study interface · ${esc(state.trial_id)}</p>${renderComposer(current)}${renderDetailsPanel(current)}`}</main>`;
   root.querySelectorAll('[data-action]').forEach((button) => button.addEventListener('click', action));
   root.querySelector('#followup-transcript')?.addEventListener('input', (event) => {
     followupDraft[current] = event.target.value;
   });
 }
 
+document.addEventListener?.('keydown', (event) => {
+  if (!detailPanel) return;
+  if (event.key === 'Escape') {
+    const previous = detailPanel;
+    detailPanel = '';
+    render();
+    root.querySelector(`.workspace-tools [data-panel="${previous}"]`)?.focus();
+  } else if (event.key === 'Tab') {
+    const focusable = [...root.querySelectorAll('.details-sheet button:not([disabled]), .details-sheet a[href]')];
+    if (!focusable.length) return;
+    if (event.shiftKey && document.activeElement === focusable[0]) {
+      event.preventDefault();
+      focusable.at(-1).focus();
+    } else if (!event.shiftKey && document.activeElement === focusable.at(-1)) {
+      event.preventDefault();
+      focusable[0].focus();
+    }
+  }
+});
+
 async function action(event) {
   const button = event.currentTarget;
   const name = button.dataset.action;
   if (name === 'select') return selectAgent(button.dataset.agent);
   if (name === 'microphone') return recording ? stopRecording() : startRecording();
+  if (name === 'close-details') {
+    const previous = detailPanel;
+    detailPanel = '';
+    render();
+    root.querySelector(`.workspace-tools [data-panel="${previous}"]`)?.focus();
+    return;
+  }
+  if (name === 'details') {
+    if (recording || busy || loggingFailed || !['context', 'activity'].includes(button.dataset.panel)) return;
+    try {
+      if (detailPanel !== button.dataset.panel) {
+        await interact('ui_layer_open', button.dataset.panel, `${selected}_details`);
+        detailPanel = button.dataset.panel;
+      }
+      render();
+      root.querySelector('.details-close')?.focus();
+    } catch { /* interact already reported the logging failure */ }
+    return;
+  }
   if (name === 'source') {
     const id = button.dataset.id;
-    if (openedRecords.has(id)) openedRecords.delete(id);
-    else { await interact('source_open', id, `${selected}_evidence`); openedRecords.add(id); }
-    return render();
+    const record = state.records.find((item) => item.record_id === id);
+    if (!record || loggingFailed) return;
+    const isContext = recordOwner(record) === null;
+    const isReference = !!button.closest('.followup-thread');
+    try {
+      if (isContext && detailPanel !== 'context') {
+        await interact('ui_layer_open', 'context', `${selected}_details`);
+        detailPanel = 'context';
+      }
+      if (openedRecords.has(id) && !isReference) openedRecords.delete(id);
+      else if (!openedRecords.has(id)) {
+        await interact('source_open', id, isContext ? `${selected}_context` : `${selected}_document`);
+        openedRecords.add(id);
+      }
+      render();
+      if (!isContext) root.querySelector('#outputs')?.scrollIntoView({ block: 'nearest' });
+    } catch { /* interact already reported the logging failure */ }
+    return;
   }
   if (name === 'event') {
     await interact('event_open', button.dataset.id, `${selected}_feed`);
