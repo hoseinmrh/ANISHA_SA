@@ -86,6 +86,12 @@ main { width: 100%; max-width: 760px; min-height: 100svh; margin: 0 auto; paddin
 .empty-thread, .system-message { width: fit-content; max-width: 100%; margin: 0 auto; border: 1px solid var(--border); border-radius: 12px; background: #10201a; padding: 11px 14px; color: #afc8bc; font-size: .89rem; line-height: 1.5; text-align: center; }
 .system-message p { margin: 5px 0 0; text-align: left; }
 .briefing-thread, .followup-thread { display: grid; gap: 15px; margin: 14px 0; }
+.conversation-thread { display: grid; gap: 18px; margin: 8px 0; }
+.conversation-thread .exchange { display: grid; gap: 10px; }
+.conversation-thread .message-user .bubble { width: min(88%, 600px); }
+.conversation-thread details { margin-top: 10px; border-top: 1px solid rgba(255, 255, 255, .15); padding-top: 10px; }
+.conversation-thread summary { cursor: pointer; color: #c9efdb; font-size: .83rem; font-weight: 700; }
+.conversation-thread details label { margin-top: 10px; }
 .briefing-thread .bubble, .followup-thread .bubble { width: fit-content; }
 .briefing-thread .message-user .bubble, .followup-thread .message-user .bubble { width: min(88%, 600px); }
 .proposal-bubble { width: min(88%, 600px) !important; }

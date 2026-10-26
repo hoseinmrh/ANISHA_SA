@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 from backend.study.runner import (
-    BriefingConfirmation, GateAnswer, ParticipantInteraction, StudyRunner,
+    BriefingConfirmation, GateAnswer, HandoffSend, ParticipantInteraction, StudyRunner,
     TechnicalFailure, participant_view,
 )
 from backend.study.setup import StudySetupStore, TrialSetupRequest, load_allocations
@@ -168,6 +168,90 @@ def _voice_connection() -> sqlite3.Connection:
     connection = store._connect()
     _voice_schema(connection)
     return connection
+
+
+def _conversation_state(trial_id: str, state) -> dict:
+    """Rebuild the two trial-scoped chats from durable voice records."""
+    if state.masked:
+        return {"conversation": [], "pending_briefings": {}, "pending_followups": {}}
+    with closing(_voice_connection()) as connection:
+        proposals = [dict(row) for row in connection.execute(
+            "SELECT * FROM condition_c_proposals WHERE trial_id = ? ORDER BY created_at_ms, rowid",
+            (trial_id,),
+        )]
+        followups = [dict(row) for row in connection.execute(
+            "SELECT * FROM condition_c_followups WHERE trial_id = ? ORDER BY created_at_ms, rowid",
+            (trial_id,),
+        )]
+        attempts = [dict(row) for row in connection.execute(
+            "SELECT * FROM condition_c_voice_attempts WHERE trial_id = ? ORDER BY started_at_ms, rowid",
+            (trial_id,),
+        )]
+
+    messages = [
+        {
+            "id": row["proposal_id"], "kind": "briefing", "agent_id": row["agent_id"],
+            "transcript": row["reviewed_transcript"], "goal": row["confirmed_goal"],
+            "created_at_ms": row["confirmed_at_ms"], "_order": index,
+        }
+        for index, row in enumerate(proposals) if row["confirmed_at_ms"] is not None
+    ]
+    messages.extend({
+        "id": row["request_id"], "kind": "followup", "agent_id": row["agent_id"],
+        "transcription_id": row["transcription_id"],
+        "transcript": row["reviewed_transcript"], "message": row["message"],
+        "status": row["status"], "record_ids": json.loads(row["record_ids_json"]),
+        "suggested_choice_id": row["suggested_choice_id"],
+        "version_kind": row["version_kind"], "created_at_ms": row["created_at_ms"],
+        "_order": index,
+    } for index, row in enumerate(followups))
+    messages.sort(key=lambda item: (item["created_at_ms"], item["kind"] == "followup", item["_order"]))
+    for message in messages:
+        del message["_order"]
+
+    pending_briefings = {}
+    pending_followups = {}
+    for agent_id in ("coding_agent", "writing_agent"):
+        if agent_id not in state.confirmed_agents and state.phase == "awaiting_briefing":
+            latest = next((row for row in reversed(attempts)
+                           if row["agent_id"] == agent_id and row["purpose"] == "briefing"
+                           and row["status"] == "recognized"), None)
+            if latest:
+                proposal = next((row for row in reversed(proposals)
+                                 if row["agent_id"] == agent_id
+                                 and row["transcription_id"] == latest["transcription_id"]
+                                 and row["confirmed_at_ms"] is None), None)
+                pending_briefings[agent_id] = {
+                    "speech": {
+                        "transcription_id": latest["transcription_id"],
+                        "activation_index": latest["activation_index"],
+                        "recognized_transcript": latest["recognized_text"], "status": "recognized",
+                    },
+                    "proposal": ({
+                        "proposal_id": proposal["proposal_id"], "agent_id": agent_id,
+                        "reviewed_transcript": proposal["reviewed_transcript"],
+                        "goal": proposal["initial_goal"],
+                        "constraints": ["Use the supplied wine sources; keep the fixed study trace."],
+                        "source_refs": [record.record_id for record in state.records if record.kind == "source"],
+                        "dependency": "Writing results wait for verified Coding output" if agent_id == "writing_agent" else None,
+                        "approval_boundary": "No overwrite or publication occurs without a reviewed decision.",
+                    } if proposal else None),
+                }
+        latest_followup = next((row for row in reversed(attempts)
+                                if row["agent_id"] == agent_id and row["purpose"] == "followup"
+                                and row["status"] == "recognized"), None)
+        if latest_followup:
+            latest_review = next((row for row in reversed(followups)
+                                  if row["transcription_id"] == latest_followup["transcription_id"]), None)
+            pending_followups[agent_id] = {
+                "transcription_id": latest_followup["transcription_id"],
+                "recognized_transcript": latest_followup["recognized_text"],
+                "reviewed_transcript": (latest_review["reviewed_transcript"] if latest_review
+                                        else latest_followup["recognized_text"]),
+                "status": "recognized",
+            }
+    return {"conversation": messages, "pending_briefings": pending_briefings,
+            "pending_followups": pending_followups}
 
 
 def _agent(agent_id: str) -> None:
@@ -350,7 +434,8 @@ def trial_app(trial_id: str):
 def participant_state(trial_id: str):
     try:
         condition_c(trial_id)
-        return participant_view(runner.participant_snapshot(trial_id))
+        snapshot = runner.participant_snapshot(trial_id)
+        return {**participant_view(snapshot).model_dump(), **_conversation_state(trial_id, snapshot)}
     except (LookupError, ValueError) as exc:
         raise _error(exc) from exc
 
@@ -582,5 +667,14 @@ def correct(trial_id: str, answer: GateAnswer):
     try:
         condition_c(trial_id)
         return participant_view(runner.correct(trial_id, answer))
+    except (LookupError, ValueError) as exc:
+        raise _error(exc) from exc
+
+
+@app.post("/study/trials/{trial_id}/handoff", dependencies=[Depends(participant_auth)])
+def send_handoff(trial_id: str, send: HandoffSend):
+    try:
+        condition_c(trial_id)
+        return participant_view(runner.send_handoff(trial_id, send))
     except (LookupError, ValueError) as exc:
         raise _error(exc) from exc

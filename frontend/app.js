@@ -21,6 +21,7 @@ let proposals = { coding_agent: null, writing_agent: null };
 let followupSpeech = { coding_agent: null, writing_agent: null };
 let followupResult = { coding_agent: null, writing_agent: null };
 let followupDraft = { coding_agent: '', writing_agent: '' };
+let handoffDraft = '';
 const openedEvents = new Set();
 const openedRecords = new Set();
 const seenCues = new Set(trialId ? JSON.parse(sessionStorage.getItem(`separate-cues:${trialId}`) || '[]') : []);
@@ -55,6 +56,7 @@ async function refresh() {
   try {
     const next = await api(`${base}/state`);
     const changed = JSON.stringify(next) !== JSON.stringify(state);
+    if (!state) restoreConversationDrafts(next);
     state = next;
     if (changed) {
       await announceCues(next);
@@ -63,6 +65,23 @@ async function refresh() {
   } catch (cause) {
     error = cause.message;
     render();
+  }
+}
+
+function restoreConversationDrafts(next) {
+  for (const agent of agents) {
+    const briefing = next.pending_briefings?.[agent];
+    if (briefing) {
+      speech[agent] = briefing.speech;
+      proposals[agent] = briefing.proposal;
+    }
+    const followup = next.pending_followups?.[agent];
+    if (followup) {
+      followupSpeech[agent] = followup;
+      followupDraft[agent] = followup.reviewed_transcript;
+    }
+    const last = [...(next.conversation || [])].reverse().find((item) => item.agent_id === agent && item.kind === 'followup');
+    if (last) followupResult[agent] = last;
   }
 }
 
@@ -119,6 +138,7 @@ function sourceLabel(record) {
 }
 
 function recordOwner(record) {
+  if (record.kind === 'source' && record.record_id.endsWith('-S3')) return 'coding_agent';
   if (record.kind === 'code_artifact') return 'coding_agent';
   if (['markdown_artifact', 'report_excerpt', 'draft_preview'].includes(record.kind)) return 'writing_agent';
   return null;
@@ -133,32 +153,30 @@ function renderContext() {
     }).join('')}</section>`;
 }
 
-function renderOutputs(agent) {
-  const records = state.records.filter((record) => recordOwner(record) === agent);
-  if (!records.length) return '';
-  return `<section class="output-thread" id="outputs" aria-label="${agentNames[agent]} documents">${records.map((record) => {
-    const isOpen = openedRecords.has(record.record_id);
-    const filename = record.kind === 'code_artifact' ? 'analysis.py' : record.kind === 'markdown_artifact' ? 'report.md' : '';
-    const preview = record.text.length > 180 ? `${record.text.slice(0, 180)}…` : record.text;
-    return `<div class="message message-agent"><span class="avatar" aria-hidden="true">${agentNames[agent][0]}</span><div class="bubble output-bubble"><div class="message-meta"><strong>${agentNames[agent]}</strong><span>${isFinalFile(record) ? 'Created file' : 'Working document'}</span></div><h3>${esc(record.title)}</h3><p class="output-preview">${esc(preview)}</p><button type="button" class="button secondary" data-action="source" data-id="${esc(record.record_id)}" aria-expanded="${isOpen}">${isOpen ? 'Hide document' : 'Open document'}</button>${isOpen ? `<div class="output-full"><pre>${esc(record.text)}</pre>${filename ? `<a download="${filename}" href="data:${record.kind === 'code_artifact' ? 'text/x-python' : 'text/markdown'};charset=utf-8,${encodeURIComponent(record.text)}">Download ${filename}</a>` : ''}</div>` : ''}</div></div>`;
-  }).join('')}</section>`;
+function renderRecord(agent, record, timestamp) {
+  const isOpen = openedRecords.has(record.record_id);
+  const filename = record.kind === 'code_artifact' ? 'analysis.py' : record.kind === 'markdown_artifact' ? 'report.md' : '';
+  const preview = record.text.length > 180 ? `${record.text.slice(0, 180)}…` : record.text;
+  const label = record.kind === 'source' ? 'Verified result' : isFinalFile(record) ? 'Created file' : 'Working document';
+  return `<div class="message message-agent" id="record-${esc(record.record_id)}"><span class="avatar" aria-hidden="true">${agentNames[agent][0]}</span><div class="bubble output-bubble"><div class="message-meta"><strong>${agentNames[agent]}</strong><span>${label}</span>${renderTime(timestamp)}</div><h3>${esc(record.kind === 'source' ? `${sourceLabel(record)} (${record.record_id})` : record.title)}</h3><p class="output-preview">${esc(preview)}</p><div class="row"><button type="button" class="button secondary" data-action="source" data-id="${esc(record.record_id)}" aria-expanded="${isOpen}">${isOpen ? 'Hide document' : 'Open document'}</button>${record.kind === 'source' && record.record_id.endsWith('-S3') ? `<button type="button" class="button secondary" data-action="copy-result" data-id="${esc(record.record_id)}">Copy verified result</button>` : ''}</div>${isOpen ? `<div class="output-full"><pre>${esc(record.text)}</pre>${filename ? `<a download="${filename}" href="data:${record.kind === 'code_artifact' ? 'text/x-python' : 'text/markdown'};charset=utf-8,${encodeURIComponent(record.text)}">Download ${filename}</a>` : ''}</div>` : ''}</div></div>`;
 }
 
 function renderDetailsPanel(agent) {
-  if (!detailPanel) return '';
-  return `<div class="details-overlay"><button type="button" class="details-scrim" data-action="close-details" aria-label="Close details"></button><aside class="details-sheet" role="dialog" aria-modal="true" aria-label="Project details"><header class="details-header"><div><p class="label">${agentNames[agent]} workspace</p><h2>Details</h2></div><button type="button" class="details-close" data-action="close-details" aria-label="Close details">×</button></header><nav class="details-tabs" aria-label="Detail sections"><button type="button" data-action="details" data-panel="context" aria-current="${detailPanel === 'context'}">Context</button><button type="button" data-action="details" data-panel="activity" aria-current="${detailPanel === 'activity'}">Activity</button></nav><div class="details-body">${detailPanel === 'context' ? renderContext() : renderFeed(agent)}</div></aside></div>`;
+  if (detailPanel !== 'context') return '';
+  return `<div class="details-overlay"><button type="button" class="details-scrim" data-action="close-details" aria-label="Close details"></button><aside class="details-sheet" role="dialog" aria-modal="true" aria-label="Project context"><header class="details-header"><div><p class="label">${agentNames[agent]} workspace</p><h2>Context</h2></div><button type="button" class="details-close" data-action="close-details" aria-label="Close details">×</button></header><div class="details-body">${renderContext()}</div></aside></div>`;
 }
 
-function renderFeed(agent) {
-  const events = state.events.filter((event) => agentForEvent(event) === agent);
-  const latest = events.at(-1);
-  const latestLine = latest ? (latest.cue_id && !openedEvents.has(latest.event_id) ? 'New update available in activity.' : latest.text) : 'No activity yet.';
-  return `<section class="conversation" aria-label="${agentNames[agent]} activity"><div class="thread-heading"><span class="online-dot"></span><span>Activity with ${agentNames[agent]}</span><span class="thread-count">${events.length} updates</span></div><div class="status-note"><span class="label">Latest status</span><p>${esc(latestLine)}</p></div><ol class="feed">${events.length ? events.map((event) => `<li class="message message-agent"><span class="avatar" aria-hidden="true">${agentNames[agent][0]}</span><div class="bubble"><div class="message-meta"><strong>${agentNames[agent]}</strong><time datetime="${new Date(event.occurred_at_ms).toISOString()}">${shortTime(event.occurred_at_ms)}</time></div>${event.cue_id && !openedEvents.has(event.event_id) ? `<p>New update ready to open.</p><button class="button secondary" data-action="event" data-id="${esc(event.event_id)}">Open update</button>` : `<p>${esc(event.text)}</p><button type="button" class="text-link" data-action="details" data-panel="context">Open reference notes</button>`}<span class="event-id">${esc(event.event_id)}</span></div></li>`).join('') : `<li class="empty-thread">${agentNames[agent]} has not posted an update yet.</li>`}</ol></section>`;
+const renderTime = (value) => Number.isFinite(value) && value > 0
+  ? `<time datetime="${new Date(value).toISOString()}">${shortTime(value)}</time>` : '';
+
+function renderEvent(agent, event) {
+  const unopened = event.cue_id && !openedEvents.has(event.event_id);
+  return `<div class="message message-agent"><span class="avatar" aria-hidden="true">${agentNames[agent][0]}</span><div class="bubble"><div class="message-meta"><strong>${agentNames[agent]}</strong><span>Update</span>${renderTime(event.occurred_at_ms)}</div>${unopened ? `<p>New update ready to open.</p><button class="button secondary" data-action="event" data-id="${esc(event.event_id)}">Open update</button>` : `<p>${esc(event.text)}</p>`}<span class="event-id">${esc(event.event_id)}</span></div></div>`;
 }
 
 function renderBriefing(agent) {
   const confirmed = state.confirmed_agents.includes(agent);
-  if (confirmed) return `<div class="system-message">${agentNames[agent]} briefing confirmed.${state.phase === 'awaiting_briefing' ? ' Brief the other agent to start both tasks.' : ''}</div>`;
+  if (confirmed) return state.phase === 'awaiting_briefing' ? `<div class="system-message">${agentNames[agent]} briefing confirmed. Brief the other agent to start both tasks.</div>` : '';
   const current = speech[agent];
   const proposal = proposals[agent];
   return `<section class="briefing-thread"><div class="message message-agent"><span class="avatar" aria-hidden="true">${agentNames[agent][0]}</span><div class="bubble"><div class="message-meta"><strong>${agentNames[agent]}</strong></div><p>Tell me what you want me to work on. Record your briefing, review the words, then confirm the goal.</p></div></div>
@@ -167,15 +185,62 @@ function renderBriefing(agent) {
   </section>`;
 }
 
+function renderVoiceExchange(agent, item, latestReview) {
+  const mayReview = !['awaiting_briefing', 'probe', 'complete', 'technical_failure'].includes(state.phase);
+  const label = item.kind === 'briefing' ? 'Briefing' : item.version_kind === 'reviewed' ? 'Edited question' : 'Voice question';
+  const editor = item.kind === 'followup' && mayReview && item.id === latestReview?.id && followupSpeech[agent]?.transcription_id === item.transcription_id;
+  return `<div class="exchange"><div class="message message-user"><div class="bubble"><div class="message-meta"><strong>You</strong><span>${label}</span>${renderTime(item.created_at_ms)}</div><p>${esc(item.transcript)}</p>${editor ? `<details><summary>Review or edit recognized words</summary><label>What ${agentNames[agent]} heard<textarea id="followup-transcript">${esc(followupDraft[agent])}</textarea></label><button type="button" class="button secondary" data-action="review-followup" ${busy || loggingFailed ? 'disabled' : ''}>Ask with reviewed words</button></details>` : ''}</div></div><div class="message message-agent"><span class="avatar" aria-hidden="true">${agentNames[agent][0]}</span><div class="bubble"><div class="message-meta"><strong>${agentNames[agent]}</strong><span>${item.kind === 'briefing' ? 'Confirmed goal' : 'Reply'}</span></div><p>${esc(item.kind === 'briefing' ? item.goal : item.message)}</p>${item.record_ids?.length ? `<div class="row">${item.record_ids.map((id) => `<button type="button" class="button secondary small" data-action="source" data-id="${esc(id)}">Open ${esc(id)}</button>`).join('')}</div>` : ''}</div></div></div>`;
+}
+
+function renderSavedDecision(decision) {
+  const detail = decision.claim_text ? `<p>Flagged claim: ${esc(decision.claim_text)}</p>` : '';
+  return `<div class="message message-user"><div class="bubble"><div class="message-meta"><strong>You</strong><span>${decision.response_order === 1 ? 'Saved decision' : 'Correction'}</span>${renderTime(decision.responded_at_ms)}</div><p>${esc(decision.choice_label)}. ${esc(decision.reason)}</p>${detail}</div></div>`;
+}
+
+function renderHandoffAttempt(attempt) {
+  return `<div class="exchange"><div class="message message-user"><div class="bubble"><div class="message-meta"><strong>You</strong><span>Sent to Writing</span>${renderTime(attempt.sent_at_ms)}</div><p>${esc(attempt.payload)}</p></div></div><div class="message message-agent"><span class="avatar" aria-hidden="true">W</span><div class="bubble"><div class="message-meta"><strong>Writing</strong><span>${attempt.valid ? 'Result received' : 'Needs correction'}</span></div><p>${esc(attempt.feedback)}</p></div></div></div>`;
+}
+
+function renderTimeline(agent) {
+  const events = state.events.filter((event) => agentForEvent(event) === agent);
+  const messages = (state.conversation || []).filter((item) => item.agent_id === agent);
+  const latestReview = [...messages].reverse().find((item) => item.kind === 'followup');
+  const eventTimes = new Map(events.map((event) => [event.event_id, event.occurred_at_ms]));
+  const entries = [
+    ...messages.map((item) => ({ kind: 'voice', time: item.created_at_ms, item })),
+    ...events.map((item) => ({ kind: 'event', time: item.occurred_at_ms, item })),
+    ...(state.decisions || []).filter((item) => agentForEvent(item) === agent)
+      .map((item) => ({ kind: 'decision', time: item.responded_at_ms, item })),
+    ...(agent === 'writing_agent' ? state.handoff_attempts || [] : [])
+      .map((item) => ({ kind: 'handoff', time: item.sent_at_ms, item })),
+    ...state.records.filter((item) => recordOwner(item) === agent)
+      .map((item) => ({ kind: 'record', time: eventTimes.get(item.release_event_id), item })),
+  ];
+  const priority = { voice: 0, decision: 1, handoff: 1, event: 2, record: 3 };
+  entries.forEach((entry, index) => { entry.order = index; });
+  entries.sort((left, right) => (left.time ?? Number.MAX_SAFE_INTEGER) - (right.time ?? Number.MAX_SAFE_INTEGER)
+    || priority[left.kind] - priority[right.kind] || left.order - right.order);
+  if (!entries.length) return '';
+  return `<section class="conversation-thread" aria-label="${agentNames[agent]} conversation history">${entries.map(({ kind, item, time }) => {
+    if (kind === 'voice') return renderVoiceExchange(agent, item, latestReview);
+    if (kind === 'event') return renderEvent(agent, item);
+    if (kind === 'decision') return renderSavedDecision(item);
+    if (kind === 'handoff') return renderHandoffAttempt(item);
+    return renderRecord(agent, item, time);
+  }).join('')}</section>`;
+}
+
+function renderHandoff(agent) {
+  if (agent !== 'writing_agent' || state.phase !== 'handoff') return '';
+  return `<section class="card handoff-card"><h2>Send Coding's verified result</h2><p>Open Coding's verified analysis summary, copy it, then paste the complete result here. Review the text before sending.</p><label>Verified result from Coding<textarea id="handoff-payload" placeholder="Paste Coding's verified result here">${esc(handoffDraft)}</textarea></label><button type="button" class="button" data-action="send-handoff" ${busy || loggingFailed ? 'disabled' : ''}>Send to Writing</button></section>`;
+}
+
 function renderFollowup(agent) {
   if (['awaiting_briefing', 'probe', 'complete', 'technical_failure'].includes(state.phase)) return '';
   const heard = followupSpeech[agent];
-  const answer = followupResult[agent];
-  const showReview = heard?.status === 'recognized';
-  if (!heard) return '';
-  return `<section class="followup-thread" aria-label="Latest voice exchange">${heard.status !== 'recognized' ? '<div class="system-message error">No words were recognized. Record again.</div>' : `<div class="message message-user"><div class="bubble"><div class="message-meta"><strong>You</strong><span>Voice question</span></div><p>${esc(followupDraft[agent])}</p>${showReview ? `<details ${answer?.status === 'needs_clarification' ? 'open' : ''}><summary>Review or edit recognized words</summary><label>What ${agentNames[agent]} heard<textarea id="followup-transcript">${esc(followupDraft[agent])}</textarea></label><button type="button" class="button secondary" data-action="review-followup" ${busy || loggingFailed ? 'disabled' : ''}>Ask with reviewed words</button></details>` : ''}</div></div>`}
-    ${answer ? `<div class="message message-agent"><span class="avatar" aria-hidden="true">${agentNames[agent][0]}</span><div class="bubble"><div class="message-meta"><strong>${agentNames[agent]}</strong></div><p role="status">${esc(answer.message)}</p>${answer.record_ids?.length ? `<div class="row">${answer.record_ids.map((id) => `<button type="button" class="button secondary small" data-action="source" data-id="${esc(id)}">Open ${esc(id)}</button>`).join('')}</div>` : ''}</div></div>` : ''}
-  </section>`;
+  if (!heard || (state.conversation || []).some((item) => item.transcription_id === heard.transcription_id)) return '';
+  if (heard.status !== 'recognized') return '<div class="system-message error">No words were recognized. Record again.</div>';
+  return `<section class="followup-thread" aria-label="Question awaiting review"><div class="message message-user"><div class="bubble"><div class="message-meta"><strong>You</strong><span>Voice question</span></div><p>${esc(followupDraft[agent])}</p><label>Review or edit recognized words<textarea id="followup-transcript">${esc(followupDraft[agent])}</textarea></label><button type="button" class="button secondary" data-action="review-followup" ${busy || loggingFailed ? 'disabled' : ''}>Ask with reviewed words</button></div></div></section>`;
 }
 
 function renderComposer(agent) {
@@ -191,14 +256,14 @@ function renderComposer(agent) {
 
 function renderDecision(agent) {
   const gateAgent = state.phase === 'blocker' ? 'coding_agent' : ['approval', 'final_review'].includes(state.phase) ? 'writing_agent' : null;
-  const correctionAgent = state.correction_for_event_id ? (state.phase === 'awaiting_approval' ? 'coding_agent' : 'writing_agent') : null;
+  const correctionAgent = state.correction_for_event_id ? (['handoff', 'awaiting_approval'].includes(state.phase) ? 'coding_agent' : 'writing_agent') : null;
   let output = '';
   const suggested = followupResult[agent]?.suggested_choice_id;
   if (gateAgent === agent) {
     const title = state.phase === 'blocker' ? 'Choose a rule' : state.phase === 'approval' ? 'Review approval request' : 'Final report review';
-    output += `<section class="card"><h2>${title}</h2><p>Inspect the activity and reference notes before deciding.</p><div class="row"><button type="button" class="text-link" data-action="details" data-panel="activity">Review activity</button><button type="button" class="text-link" data-action="details" data-panel="context">Open reference notes</button></div><div class="stack">${state.action_options.map((option) => `<label class="choice"><input name="decision" type="radio" value="${esc(option.choice_id)}" ${option.choice_id === suggested ? 'checked' : ''}>${esc(option.label)}</label>`).join('')}<label>Reason<textarea id="reason"></textarea></label>${state.phase === 'final_review' ? '<label>Exact claim needing correction<textarea id="claim"></textarea></label>' : ''}<label>Confidence (0–100)<input id="confidence" type="number" min="0" max="100"></label><button class="button" data-action="respond" ${busy || loggingFailed ? 'disabled' : ''}>Save first answer</button></div></section>`;
+    output += `<section class="card"><h2>${title}</h2><p>Review this conversation and the reference notes before deciding.</p><button type="button" class="text-link" data-action="details" data-panel="context">Open reference notes</button><div class="stack">${state.action_options.map((option) => `<label class="choice"><input name="decision" type="radio" value="${esc(option.choice_id)}" ${option.choice_id === suggested ? 'checked' : ''}>${esc(option.label)}</label>`).join('')}<label>Reason<textarea id="reason"></textarea></label>${state.phase === 'final_review' ? '<label>Exact claim needing correction<textarea id="claim"></textarea></label>' : ''}<label>Confidence (0–100)<input id="confidence" type="number" min="0" max="100"></label><button class="button" data-action="respond" ${busy || loggingFailed ? 'disabled' : ''}>Save first answer</button></div></section>`;
   }
-  if (correctionAgent === agent) output += `<section class="card"><h2>Feedback and one correction</h2><p>First answer: ${esc(state.correction_previous_choice_label)}. ${esc(state.correction_previous_reason)}</p><p>See the latest feedback in the activity feed.</p><div class="stack">${state.correction_options.map((option) => `<label class="choice"><input name="correction" type="radio" value="${esc(option.choice_id)}" ${option.choice_id === suggested ? 'checked' : ''}>${esc(option.label)}</label>`).join('')}<label>Corrected reason<textarea id="correction-reason"></textarea></label><button class="button secondary" data-action="correct" ${busy || loggingFailed ? 'disabled' : ''}>Save correction</button></div></section>`;
+  if (correctionAgent === agent) output += `<section class="card"><h2>Feedback and one correction</h2><p>First answer: ${esc(state.correction_previous_choice_label)}. ${esc(state.correction_previous_reason)}</p><p>See the latest feedback above in this conversation.</p><div class="stack">${state.correction_options.map((option) => `<label class="choice"><input name="correction" type="radio" value="${esc(option.choice_id)}" ${option.choice_id === suggested ? 'checked' : ''}>${esc(option.label)}</label>`).join('')}<label>Corrected reason<textarea id="correction-reason"></textarea></label><button class="button secondary" data-action="correct" ${busy || loggingFailed ? 'disabled' : ''}>Save correction</button></div></section>`;
   return output;
 }
 
@@ -210,18 +275,20 @@ function render() {
   const current = selected && agents.includes(selected) ? selected : '';
   const task = state.tasks.find((item) => item.agent_id === current);
   const agentEvents = Object.fromEntries(agents.map((agent) => [agent, state.events.filter((event) => agentForEvent(event) === agent)]));
-  const badge = (agent) => agentEvents[agent].filter((event) => event.cue_id && !openedEvents.has(event.event_id)).length + (state.phase === 'blocker' && agent === 'coding_agent' || ['approval', 'final_review'].includes(state.phase) && agent === 'writing_agent' ? 1 : 0);
-  const threadContent = current && state.phase !== 'awaiting_briefing'
-    ? renderOutputs(current) + renderFollowup(current) + renderDecision(current)
-    : '';
+  const badge = (agent) => agentEvents[agent].filter((event) => event.cue_id && !openedEvents.has(event.event_id)).length + (state.phase === 'blocker' && agent === 'coding_agent' || ['handoff', 'approval', 'final_review'].includes(state.phase) && agent === 'writing_agent' ? 1 : 0);
+  const threadContent = current ? renderTimeline(current) + (state.phase === 'awaiting_briefing'
+    ? renderBriefing(current) : renderFollowup(current) + renderHandoff(current) + renderDecision(current)) : '';
   root.innerHTML = `<main class="participant-shell"><header class="top"><span class="brand-mark" aria-hidden="true">${current ? agentNames[current][0] : 'S'}</span><div class="brand-copy"><p class="label">${esc(state.interface_label)} · Separate Agents</p><h1 class="title">${current ? `${agentNames[current]} agent` : 'Choose an agent'}</h1></div><span class="status phase-status">${esc(state.phase.replaceAll('_', ' '))}</span></header>
     ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}${cueNotice ? `<p class="notice">${esc(cueNotice)}</p>` : ''}
-    ${!current ? `<section class="welcome-panel"><p class="label">Your conversations</p><h2>Coding and Writing</h2><p>Open an agent to brief it or review its activity.</p><div class="chooser">${agents.map((agent) => `<button class="agent-choice" data-action="select" data-agent="${agent}"><span class="avatar" aria-hidden="true">${agentNames[agent][0]}</span><span><strong>${agentNames[agent]}</strong><small>Open conversation</small></span><span class="chevron" aria-hidden="true">›</span></button>`).join('')}</div></section>` : `<nav class="tabs" aria-label="Agents">${agents.map((agent) => `<button class="tab" role="tab" aria-selected="${agent === current}" data-action="select" data-agent="${agent}" ${recording || busy ? 'disabled' : ''}><span class="tab-dot"></span>${agentNames[agent]} ${badge(agent) ? `<span class="badge">${badge(agent)}</span>` : ''}</button>`).join('')}</nav><div class="workspace-tools"><button type="button" data-action="details" data-panel="context">Context</button><button type="button" data-action="details" data-panel="activity">Activity ${badge(current) ? `<span class="badge">${badge(current)}</span>` : ''}</button></div><section class="task-banner"><div><p class="label">Current task</p><h2>${task ? esc(task.goal) : `${agentNames[current]} task`}</h2>${current === 'writing_agent' && task?.depends_on ? '<p class="small muted">Results section waits for verified Coding output.</p>' : ''}</div><span class="status ${esc(task?.state || '')}">${esc(task?.state?.replaceAll('_', ' ') || (state.confirmed_agents.includes(current) ? 'briefed' : 'awaiting briefing'))}</span></section>
-    <div class="chat-content">${state.phase === 'awaiting_briefing' ? `<div class="system-message">Project brief and reference notes are in Context.</div>${renderBriefing(current)}` : threadContent || '<div class="system-message">No messages yet. Agent updates are in Activity.</div>'}${state.phase === 'complete' ? '<div class="system-message">Trial complete. Please return the phone to the researcher when finished.</div>' : ''}</div>
+    ${!current ? `<section class="welcome-panel"><p class="label">Your conversations</p><h2>Coding and Writing</h2><p>Open an agent to brief it or review its conversation.</p><div class="chooser">${agents.map((agent) => `<button class="agent-choice" data-action="select" data-agent="${agent}"><span class="avatar" aria-hidden="true">${agentNames[agent][0]}</span><span><strong>${agentNames[agent]}</strong><small>Open conversation</small></span><span class="chevron" aria-hidden="true">›</span></button>`).join('')}</div></section>` : `<nav class="tabs" aria-label="Agents">${agents.map((agent) => `<button class="tab" role="tab" aria-selected="${agent === current}" data-action="select" data-agent="${agent}" ${recording || busy ? 'disabled' : ''}><span class="tab-dot"></span>${agentNames[agent]} ${badge(agent) ? `<span class="badge">${badge(agent)}</span>` : ''}</button>`).join('')}</nav><div class="workspace-tools"><button type="button" data-action="details" data-panel="context">Context</button></div><section class="task-banner"><div><p class="label">Current task</p><h2>${task ? esc(task.goal) : `${agentNames[current]} task`}</h2>${current === 'writing_agent' && task?.depends_on ? `<p class="small muted">${task.state === 'waiting_for_result_transfer' ? 'Results section waits for the Coding result to be transferred.' : 'Results section waits for verified Coding output.'}</p>` : ''}</div><span class="status ${esc(task?.state || '')}">${esc(task?.state?.replaceAll('_', ' ') || (state.confirmed_agents.includes(current) ? 'briefed' : 'awaiting briefing'))}</span></section>
+    <div class="chat-content">${state.phase === 'awaiting_briefing' ? '<div class="system-message">Project brief and supervisor notes are in Context.</div>' : ''}${threadContent || '<div class="system-message">No messages yet.</div>'}${state.phase === 'complete' ? '<div class="system-message">Trial complete. Please return the phone to the researcher when finished.</div>' : ''}</div>
     <p class="footer">Study interface · ${esc(state.trial_id)}</p>${renderComposer(current)}${renderDetailsPanel(current)}`}</main>`;
   root.querySelectorAll('[data-action]').forEach((button) => button.addEventListener('click', action));
   root.querySelector('#followup-transcript')?.addEventListener('input', (event) => {
     followupDraft[current] = event.target.value;
+  });
+  root.querySelector('#handoff-payload')?.addEventListener('input', (event) => {
+    handoffDraft = event.target.value;
   });
 }
 
@@ -258,7 +325,7 @@ async function action(event) {
     return;
   }
   if (name === 'details') {
-    if (recording || busy || loggingFailed || !['context', 'activity'].includes(button.dataset.panel)) return;
+    if (recording || busy || loggingFailed || button.dataset.panel !== 'context') return;
     try {
       if (detailPanel !== button.dataset.panel) {
         await interact('ui_layer_open', button.dataset.panel, `${selected}_details`);
@@ -274,7 +341,7 @@ async function action(event) {
     const record = state.records.find((item) => item.record_id === id);
     if (!record || loggingFailed) return;
     const isContext = recordOwner(record) === null;
-    const isReference = !!button.closest('.followup-thread');
+    const isReference = !!button.closest('.followup-thread, .conversation-thread');
     try {
       if (isContext && detailPanel !== 'context') {
         await interact('ui_layer_open', 'context', `${selected}_details`);
@@ -286,13 +353,24 @@ async function action(event) {
         openedRecords.add(id);
       }
       render();
-      if (!isContext) root.querySelector('#outputs')?.scrollIntoView({ block: 'nearest' });
+      if (!isContext) root.querySelector(`#record-${id}`)?.scrollIntoView({ block: 'nearest' });
     } catch { /* interact already reported the logging failure */ }
     return;
   }
   if (name === 'event') {
-    await interact('event_open', button.dataset.id, `${selected}_feed`);
+    await interact('event_open', button.dataset.id, `${selected}_chat`);
     openedEvents.add(button.dataset.id); return render();
+  }
+  if (name === 'copy-result') {
+    const record = state.records.find((item) => item.record_id === button.dataset.id);
+    if (!record || selected !== 'coding_agent' || record.kind !== 'source' || !record.record_id.endsWith('-S3')) return;
+    try {
+      await navigator.clipboard.writeText(record.text);
+      await interact('result_copy', record.record_id, 'coding_agent_chat');
+      cueNotice = `${record.record_id} copied. Open Writing, paste the result, and Send.`;
+      render();
+    } catch (cause) { error = `Copy failed: ${cause.message}. Open the verified result and copy its text manually.`; render(); }
+    return;
   }
   if (busy || loggingFailed) return;
   busy = true; error = ''; button.disabled = true;
@@ -310,11 +388,13 @@ async function action(event) {
         reviewed_transcript: words,
       });
       if (followupResult[selected].revealed_event_id) openedEvents.add(followupResult[selected].revealed_event_id);
+      state = await api(`${base}/state`);
     } else if (name === 'confirm') {
       const goal = root.querySelector('#goal').value.trim();
       if (!goal) throw new Error('Enter a goal.');
       state = await api(`${base}/agents/${selected}/proposals/${proposals[selected].proposal_id}/confirm`, 'POST', { goal });
       proposals[selected] = null;
+      state = await api(`${base}/state`);
     } else if (name === 'respond') {
       const choice = root.querySelector('input[name="decision"]:checked')?.value;
       const reason = root.querySelector('#reason').value.trim();
@@ -322,11 +402,21 @@ async function action(event) {
       const claim = root.querySelector('#claim')?.value.trim() || '';
       if (!choice || !reason || confidence === '' || state.phase === 'final_review' && !claim) throw new Error('Complete the choice, reason, confidence, and any requested claim.');
       state = await api(`${base}/responses`, 'POST', { choice_id: choice, reason, confidence: Number(confidence), claim_text: claim });
+      state = await api(`${base}/state`);
+      await announceCues(state);
+    } else if (name === 'send-handoff') {
+      const payload = root.querySelector('#handoff-payload')?.value || '';
+      if (!payload.trim()) throw new Error('Paste Coding’s verified result before sending.');
+      handoffDraft = payload;
+      state = await api(`${base}/handoff`, 'POST', { payload });
+      state = await api(`${base}/state`);
+      if (state.phase !== 'handoff') handoffDraft = '';
     } else if (name === 'correct') {
       const choice = root.querySelector('input[name="correction"]:checked')?.value;
       const reason = root.querySelector('#correction-reason').value.trim();
       if (!choice || !reason) throw new Error('Choose a corrected answer and give a reason.');
       state = await api(`${base}/corrections`, 'POST', { choice_id: choice, reason });
+      state = await api(`${base}/state`);
     }
   } catch (cause) { error = cause.message; }
   finally { busy = false; render(); }
@@ -407,6 +497,7 @@ async function stopRecording() {
           transcription_id: heard.transcription_id,
         });
         if (followupResult[recordingAgent].revealed_event_id) openedEvents.add(followupResult[recordingAgent].revealed_event_id);
+        state = await api(`${base}/state`);
       }
     }
     error = heard.status === 'recognized' ? '' : 'Speech was not recognized. Record again.';

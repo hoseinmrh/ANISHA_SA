@@ -116,6 +116,14 @@ class StudySetupStore:
                 build_hash TEXT NOT NULL DEFAULT ''
             )"""
         )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS study_material_snapshots (
+                trial_id TEXT PRIMARY KEY,
+                materials_json TEXT NOT NULL,
+                snapshot_checksum TEXT NOT NULL,
+                FOREIGN KEY (trial_id) REFERENCES study_trials(trial_id)
+            )"""
+        )
         existing_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(study_trials)")
         }
@@ -179,8 +187,34 @@ class StudySetupStore:
                     )""",
                     record.model_dump(),
                 )
+                self._save_material_snapshot(connection, record, materials)
                 StudyRunner.initialize(connection, record, materials)
         return record
+
+    @staticmethod
+    def _save_material_snapshot(connection: sqlite3.Connection, trial: TrialRecord,
+                                materials: StudyMaterials) -> None:
+        if (
+            trial.materials_version != materials.version
+            or trial.scenario_checksum != materials.scenario_checksum
+            or trial.trace_checksum != materials.trace_checksum
+        ):
+            raise ValueError("Material snapshot does not match this trial")
+        contents = materials.model_dump_json()
+        checksum = hashlib.sha256(contents.encode("utf-8")).hexdigest()
+        connection.execute(
+            """INSERT INTO study_material_snapshots
+               (trial_id, materials_json, snapshot_checksum) VALUES (?, ?, ?)""",
+            (trial.trial_id, contents, checksum),
+        )
+
+    def restore_material_snapshot(self, trial_id: str, materials: StudyMaterials) -> None:
+        """Recover a legacy trial only from materials matching its recorded hashes."""
+        trial = self.get_trial(trial_id)
+        if trial is None:
+            raise LookupError("Trial not found")
+        with closing(self._connect()) as connection, connection:
+            self._save_material_snapshot(connection, trial, materials)
 
     def get_trial(self, trial_id: str) -> TrialRecord | None:
         with closing(self._connect()) as connection:
@@ -190,18 +224,29 @@ class StudySetupStore:
         return TrialRecord(**dict(row)) if row is not None else None
 
     def materials_for_trial(self, trial_id: str) -> StudyMaterials | None:
-        from backend.study.build import current_build_hash
-        from backend.study.materials import load_study_materials
+        from backend.study.materials import StudyMaterials, load_study_materials
 
         trial = self.get_trial(trial_id)
         if trial is None:
             return None
-        materials = load_study_materials()
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT materials_json, snapshot_checksum FROM study_material_snapshots WHERE trial_id = ?",
+                (trial_id,),
+            ).fetchone()
+        if row is not None:
+            if hashlib.sha256(row["materials_json"].encode("utf-8")).hexdigest() != row["snapshot_checksum"]:
+                raise ValueError("Stored study material snapshot is damaged")
+            materials = StudyMaterials.model_validate_json(row["materials_json"])
+        else:
+            materials = load_study_materials()
         if (
             trial.scenario_checksum != materials.scenario_checksum
             or trial.trace_checksum != materials.trace_checksum
             or trial.materials_version != materials.version
-            or trial.build_hash != current_build_hash()
         ):
-            raise ValueError("Study materials or application build changed since this trial was created")
+            raise ValueError("Study materials changed since this trial was created")
+        if row is None:
+            with closing(self._connect()) as connection, connection:
+                self._save_material_snapshot(connection, trial, materials)
         return materials

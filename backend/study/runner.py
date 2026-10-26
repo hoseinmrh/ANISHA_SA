@@ -32,12 +32,25 @@ class GateAnswer(BaseModel):
     claim_text: str = ""
 
 
+class HandoffSend(BaseModel):
+    payload: str = Field(min_length=1, max_length=5000)
+
+
+class HandoffAttempt(BaseModel):
+    attempt_id: str
+    source_id: str | None
+    payload: str
+    valid: bool
+    feedback: str
+    sent_at_ms: int
+
+
 class TechnicalFailure(BaseModel):
     reason: str = Field(min_length=1)
 
 
 class ParticipantInteraction(BaseModel):
-    event_type: Literal["event_open", "source_open", "cue_delivered", "agent_switch", "ui_layer_open"]
+    event_type: Literal["event_open", "source_open", "result_copy", "cue_delivered", "agent_switch", "ui_layer_open"]
     target_id: str = Field(min_length=1, max_length=120)
     ui_layer: str = Field(min_length=1, max_length=80)
     client_ts_ms: int | None = None
@@ -64,6 +77,19 @@ class ContentRecord(BaseModel):
     kind: str
     title: str
     text: str
+    release_event_id: str | None = None
+
+
+class DecisionRecord(BaseModel):
+    response_id: str
+    gate_event_id: str
+    task_id: str
+    response_order: int
+    choice_label: str
+    reason: str
+    confidence: int | None
+    claim_text: str
+    responded_at_ms: int
 
 
 class DeliveredEvent(BaseModel):
@@ -92,6 +118,8 @@ class TrialSnapshot(BaseModel):
     tasks: list[TaskRecord]
     records: list[ContentRecord]
     events: list[DeliveredEvent]
+    decisions: list[DecisionRecord]
+    handoff_attempts: list[HandoffAttempt]
     action_options: list[ActionOption]
     correction_options: list[ActionOption] = []
     correction_for_event_id: str | None = None
@@ -117,6 +145,8 @@ class ParticipantTrialView(BaseModel):
     tasks: list[TaskRecord]
     records: list[ContentRecord]
     events: list[ParticipantEvent]
+    decisions: list[DecisionRecord]
+    handoff_attempts: list[HandoffAttempt]
     action_options: list[ActionOption]
     correction_options: list[ActionOption]
     correction_for_event_id: str | None
@@ -145,6 +175,8 @@ def participant_view(state: TrialSnapshot) -> ParticipantTrialView:
             for event in state.events
             if event.script_key != "probe_dependency"
         ],
+        decisions=state.decisions,
+        handoff_attempts=state.handoff_attempts,
         action_options=state.action_options,
         correction_options=state.correction_options,
         correction_for_event_id=state.correction_for_event_id,
@@ -161,6 +193,18 @@ class StudyRunner:
     def __init__(self, store: StudySetupStore, clock: Callable[[], int] = server_time_ms):
         self.store = store
         self.clock = clock
+
+    @staticmethod
+    def _event(variant: VariantStimuli, key: str) -> EventSpec:
+        return next(event for event in variant.trace if event.script_key == key)
+
+    @staticmethod
+    def _index(variant: VariantStimuli, key: str) -> int:
+        return next(index for index, event in enumerate(variant.trace) if event.script_key == key)
+
+    @staticmethod
+    def _has_event(variant: VariantStimuli, key: str) -> bool:
+        return any(event.script_key == key for event in variant.trace)
 
     @staticmethod
     def create_schema(connection: sqlite3.Connection) -> None:
@@ -239,6 +283,15 @@ class StudyRunner:
                 latency_ms INTEGER NOT NULL,
                 UNIQUE (trial_id, gate_event_id, response_order)
             );
+            CREATE TABLE IF NOT EXISTS study_handoff_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                trial_id TEXT NOT NULL,
+                source_id TEXT,
+                payload TEXT NOT NULL,
+                valid INTEGER NOT NULL,
+                feedback TEXT NOT NULL,
+                sent_at_ms INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS study_researcher_operations (
                 operation_id TEXT PRIMARY KEY,
                 trial_id TEXT NOT NULL,
@@ -282,7 +335,7 @@ class StudyRunner:
                     "source",
                     source.title,
                     source.text,
-                    None if source.release_gate == "briefing" else variant.trace[10].event_id,
+                    None if source.release_gate == "briefing" else StudyRunner._event(variant, source.release_gate).event_id,
                 ),
             )
         connection.execute(
@@ -291,7 +344,7 @@ class StudyRunner:
                 trial.trial_id,
                 f"{trial.wine_variant}-approval-draft",
                 variant.approval_draft_preview,
-                variant.trace[8].event_id,
+                StudyRunner._event(variant, "overwrite_request" if trial.wine_variant == "wine_1" else "publish_request").event_id,
             ),
         )
         connection.execute(
@@ -302,7 +355,7 @@ class StudyRunner:
                 "report_excerpt",
                 "Final report excerpt",
                 variant.final_report_excerpt,
-                variant.trace[10].event_id,
+                StudyRunner._event(variant, "final_review").event_id,
             ),
         )
         for suffix, kind, title, contents in (
@@ -317,13 +370,13 @@ class StudyRunner:
                     kind,
                     title,
                     contents,
-                    variant.trace[10].event_id,
+                    StudyRunner._event(variant, "coding_complete" if kind == "code_artifact" and StudyRunner._has_event(variant, "coding_complete") else "final_review").event_id,
                 ),
             )
         blocker_id, approval_id, final_id = (
-            variant.trace[5].event_id,
-            variant.trace[8].event_id,
-            variant.trace[10].event_id,
+            StudyRunner._event(variant, "conflicting_definition" if trial.wine_variant == "wine_1" else "conflicting_outlier_rule").event_id,
+            StudyRunner._event(variant, "overwrite_request" if trial.wine_variant == "wine_1" else "publish_request").event_id,
+            StudyRunner._event(variant, "final_review").event_id,
         )
         for source in variant.sources[:2]:
             connection.execute(
@@ -434,6 +487,8 @@ class StudyRunner:
                 "tasks": [],
                 "records": [],
                 "events": [],
+                "decisions": [],
+                "handoff_attempts": [],
                 "action_options": [],
                 "correction_options": [],
                 "correction_for_event_id": None,
@@ -452,10 +507,15 @@ class StudyRunner:
             self._advance(connection, trial_id, variant, now)
             runtime = self._runtime(connection, trial_id)
             phase = runtime["phase"]
-            gate_index = {"probe": 4, "blocker": 5, "approval": 8, "final_review": 10}.get(phase)
-            if gate_index is None:
+            gate_key = {
+                "probe": "probe_dependency",
+                "blocker": "conflicting_definition" if trial.wine_variant == "wine_1" else "conflicting_outlier_rule",
+                "approval": "overwrite_request" if trial.wine_variant == "wine_1" else "publish_request",
+                "final_review": "final_review",
+            }.get(phase)
+            if gate_key is None:
                 raise ValueError("No decision gate is awaiting a response")
-            gate = variant.trace[gate_index]
+            gate = self._event(variant, gate_key)
             if phase != "probe":
                 if answer.confidence is None:
                     raise ValueError("Confidence is required before feedback")
@@ -477,8 +537,8 @@ class StudyRunner:
             self._save_response(connection, trial_id, gate.event_id, 1, answer, now)
             if phase == "probe":
                 connection.execute(
-                    "UPDATE study_trial_runtime SET phase = 'awaiting_pair', anchor_ms = ?, next_index = 5 WHERE trial_id = ?",
-                    (now, trial_id),
+                    "UPDATE study_trial_runtime SET phase = 'awaiting_pair', anchor_ms = ?, next_index = ? WHERE trial_id = ?",
+                    (now, self._index(variant, gate_key) + 1, trial_id),
                 )
             elif phase == "blocker":
                 feedback = (
@@ -486,10 +546,22 @@ class StudyRunner:
                     if answer.choice_id == variant.sources[0].source_id
                     else materials.feedback["blocker_wrong"]
                 )
-                self._deliver(connection, trial_id, variant, variant.trace[7], now, now, feedback)
+                self._deliver(connection, trial_id, variant, self._event(variant, "blocker_feedback"), now, now, feedback)
+                if self._has_event(variant, "coding_complete"):
+                    self._deliver(
+                        connection, trial_id, variant, self._event(variant, "coding_complete"),
+                        now, now, cue_id=f"{trial_id}:coding-complete-cue",
+                    )
+                handoff = self._has_event(variant, "writing_requests_result")
+                if handoff:
+                    self._deliver(
+                        connection, trial_id, variant,
+                        self._event(variant, "writing_requests_result"), now, now,
+                    )
                 connection.execute(
-                    "UPDATE study_trial_runtime SET phase = 'awaiting_approval', anchor_ms = ?, next_index = 8 WHERE trial_id = ?",
-                    (now, trial_id),
+                    "UPDATE study_trial_runtime SET phase = ?, anchor_ms = ?, next_index = ? WHERE trial_id = ?",
+                    ("handoff" if handoff else "awaiting_approval", now,
+                     self._index(variant, "overwrite_request" if trial.wine_variant == "wine_1" else "publish_request"), trial_id),
                 )
             elif phase == "approval":
                 feedback = (
@@ -497,15 +569,15 @@ class StudyRunner:
                     if answer.choice_id == "reject"
                     else materials.feedback["approval_approved_or_deferred"]
                 )
-                self._deliver(connection, trial_id, variant, variant.trace[9], now, now, feedback)
+                self._deliver(connection, trial_id, variant, self._event(variant, "approval_feedback"), now, now, feedback)
                 connection.execute(
-                    "UPDATE study_trial_runtime SET phase = 'awaiting_final', anchor_ms = ?, next_index = 10 WHERE trial_id = ?",
-                    (now, trial_id),
+                    "UPDATE study_trial_runtime SET phase = 'awaiting_final', anchor_ms = ?, next_index = ? WHERE trial_id = ?",
+                    (now, self._index(variant, "final_review"), trial_id),
                 )
             else:
                 connection.execute(
-                    "UPDATE study_trial_runtime SET phase = 'complete', next_index = 11 WHERE trial_id = ?",
-                    (trial_id,),
+                    "UPDATE study_trial_runtime SET phase = 'complete', next_index = ? WHERE trial_id = ?",
+                    (len(variant.trace), trial_id),
                 )
             return self._snapshot(connection, trial, variant)
 
@@ -515,17 +587,21 @@ class StudyRunner:
         with closing(self._open()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             phase = self._runtime(connection, trial_id)["phase"]
-            gate_index = {"awaiting_approval": 5, "awaiting_final": 8}.get(phase)
-            if gate_index is None:
+            gate_key = {
+                "handoff": "conflicting_definition" if trial.wine_variant == "wine_1" else "conflicting_outlier_rule",
+                "awaiting_approval": "conflicting_definition" if trial.wine_variant == "wine_1" else "conflicting_outlier_rule",
+                "awaiting_final": "overwrite_request" if trial.wine_variant == "wine_1" else "publish_request",
+            }.get(phase)
+            if gate_key is None:
                 raise ValueError("No correction window is open")
-            gate_id = variant.trace[gate_index].event_id
+            gate_id = self._event(variant, gate_key).event_id
             first = connection.execute(
                 "SELECT choice_id FROM study_responses WHERE trial_id = ? AND gate_event_id = ? AND response_order = 1",
                 (trial_id, gate_id),
             ).fetchone()
             if first is None:
                 raise ValueError("First response is missing")
-            if phase == "awaiting_approval" and first["choice_id"] == variant.sources[0].source_id:
+            if phase in {"handoff", "awaiting_approval"} and first["choice_id"] == variant.sources[0].source_id:
                 raise ValueError("No blocker correction is offered after the latest rule")
             if phase == "awaiting_final" and first["choice_id"] == "reject":
                 raise ValueError("No approval correction is offered after rejection")
@@ -539,6 +615,52 @@ class StudyRunner:
             if answer.choice_id not in valid:
                 raise ValueError("Invalid correction choice")
             self._save_response(connection, trial_id, gate_id, 2, answer, now)
+            return self._snapshot(connection, trial, variant)
+
+    def send_handoff(self, trial_id: str, send: HandoffSend) -> TrialSnapshot:
+        trial, materials, variant = self._trial_materials(trial_id)
+        if trial.condition != "condition_c" or not self._has_event(variant, "writing_requests_result"):
+            raise ValueError("This trial has no participant handoff")
+        now = self.clock()
+        with closing(self._open()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._runtime(connection, trial_id)["phase"] != "handoff":
+                raise ValueError("Writing is not waiting for a participant handoff")
+            source = variant.sources[2]
+            source_released = connection.execute(
+                """SELECT 1 FROM study_event_history
+                   WHERE trial_id = ? AND event_id = ?""",
+                (trial_id, self._event(variant, "coding_complete").event_id),
+            ).fetchone()
+            if source_released is None:
+                raise ValueError("Verified Coding output has not been released")
+            copied = connection.execute(
+                """SELECT target_id FROM study_interactions
+                   WHERE trial_id = ? AND event_type = 'result_copy'
+                   ORDER BY server_ts_ms DESC, rowid DESC LIMIT 1""",
+                (trial_id,),
+            ).fetchone()
+            valid = send.payload.strip() == source.text.strip()
+            feedback = materials.feedback["handoff_valid" if valid else "handoff_invalid"]
+            connection.execute(
+                "INSERT INTO study_handoff_attempts VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (str(uuid4()), trial_id, copied["target_id"] if copied else None,
+                 send.payload, int(valid), feedback, now),
+            )
+            if valid:
+                connection.execute(
+                    """UPDATE study_tasks SET state = 'running'
+                       WHERE trial_id = ? AND agent_id = 'writing_agent'
+                       AND state = 'waiting_for_result_transfer'""",
+                    (trial_id,),
+                )
+                if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                    raise ValueError("Writing was not waiting for this result")
+                connection.execute(
+                    "UPDATE study_trial_runtime SET phase = 'awaiting_approval' WHERE trial_id = ?",
+                    (trial_id,),
+                )
+                self._advance(connection, trial_id, variant, now)
             return self._snapshot(connection, trial, variant)
 
     def pause_after_failure(self, trial_id: str, failure: TechnicalFailure) -> TrialSnapshot:
@@ -601,6 +723,7 @@ class StudyRunner:
             "events": "study_event_history",
             "action_options": "study_action_options",
             "responses": "study_responses",
+            "handoff_attempts": "study_handoff_attempts",
             "researcher_operations": "study_researcher_operations",
             "condition_c_goals": "study_condition_c_goals",
             "interactions": "study_interactions",
@@ -636,13 +759,18 @@ class StudyRunner:
                 ).fetchone()
                 if event is None or event["script_key"] == "probe_dependency":
                     raise ValueError("Event is not available in this trial")
-            elif interaction.event_type == "source_open":
+            elif interaction.event_type in {"source_open", "result_copy"}:
                 record = connection.execute(
-                    "SELECT release_event_id FROM study_content WHERE trial_id = ? AND record_id = ?",
+                    "SELECT kind, release_event_id FROM study_content WHERE trial_id = ? AND record_id = ?",
                     (trial_id, interaction.target_id),
                 ).fetchone()
                 if record is None:
                     raise ValueError("Source is not available in this trial")
+                if interaction.event_type == "result_copy" and (
+                    interaction.target_id != variant.sources[2].source_id
+                    or record["kind"] != "source"
+                ):
+                    raise ValueError("Only the verified Coding result can be copied for handoff")
                 if record["release_event_id"] and not connection.execute(
                     "SELECT 1 FROM study_event_history WHERE trial_id = ? AND event_id = ?",
                     (trial_id, record["release_event_id"]),
@@ -708,9 +836,9 @@ class StudyRunner:
 
     @staticmethod
     def _task_id(trial_id: str, key: str) -> str | None:
-        if key in {"validation_progress", "analysis_started", "conflicting_definition", "conflicting_outlier_rule", "blocker_feedback"}:
+        if key in {"validation_progress", "analysis_started", "conflicting_definition", "conflicting_outlier_rule", "blocker_feedback", "coding_complete"}:
             return f"{trial_id}:coding"
-        if key in {"outline_complete", "competing_completion", "overwrite_request", "publish_request", "approval_feedback", "final_review"}:
+        if key in {"outline_complete", "competing_completion", "writing_requests_result", "overwrite_request", "publish_request", "approval_feedback", "final_review"}:
             return f"{trial_id}:writing"
         return None
 
@@ -748,22 +876,45 @@ class StudyRunner:
                 "UPDATE study_tasks SET state = 'running' WHERE trial_id = ? AND agent_id = 'coding_agent'",
                 (trial_id,),
             )
+        elif event.script_key == "coding_complete":
+            connection.execute(
+                """UPDATE study_tasks SET state = 'completed', verified_results_ready = 1
+                   WHERE trial_id = ? AND agent_id = 'coding_agent' AND state = 'running'""",
+                (trial_id,),
+            )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                raise ValueError("Coding cannot complete before the blocker is resolved")
+            connection.execute(
+                """UPDATE study_tasks SET state = 'waiting_for_result_transfer'
+                   WHERE trial_id = ? AND agent_id = 'writing_agent'
+                   AND outline_ready = 1 AND verified_results_ready = 0""",
+                (trial_id,),
+            )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                raise ValueError("Writing must be waiting for the verified Coding result")
         elif event.script_key in {"overwrite_request", "publish_request"}:
             connection.execute(
                 "UPDATE study_tasks SET state = 'awaiting_approval' WHERE trial_id = ? AND agent_id = 'writing_agent'",
                 (trial_id,),
             )
         elif event.script_key == "approval_feedback":
-            connection.execute(
-                "UPDATE study_tasks SET state = 'waiting_for_verified_results' WHERE trial_id = ? AND agent_id = 'writing_agent'",
+            transferred = connection.execute(
+                "SELECT 1 FROM study_handoff_attempts WHERE trial_id = ? AND valid = 1",
                 (trial_id,),
+            ).fetchone() is not None
+            connection.execute(
+                "UPDATE study_tasks SET state = ? WHERE trial_id = ? AND agent_id = 'writing_agent'",
+                ("running" if transferred else
+                 "waiting_for_result_transfer" if self._has_event(variant, "coding_complete") else
+                 "waiting_for_verified_results", trial_id),
             )
         elif event.script_key == "final_review":
-            connection.execute(
-                """UPDATE study_tasks SET state = 'completed', verified_results_ready = 1
-                   WHERE trial_id = ? AND agent_id = 'coding_agent'""",
-                (trial_id,),
-            )
+            if not self._has_event(variant, "coding_complete"):
+                connection.execute(
+                    """UPDATE study_tasks SET state = 'completed', verified_results_ready = 1
+                       WHERE trial_id = ? AND agent_id = 'coding_agent'""",
+                    (trial_id,),
+                )
             verified_coding = connection.execute(
                 """SELECT 1 FROM study_tasks WHERE trial_id = ? AND agent_id = 'coding_agent'
                    AND state = 'completed' AND verified_results_ready = 1""",
@@ -771,6 +922,11 @@ class StudyRunner:
             ).fetchone()
             if verified_coding is None:
                 raise ValueError("Writing results cannot complete before verified Coding output")
+            if self._has_event(variant, "writing_requests_result") and not connection.execute(
+                "SELECT 1 FROM study_handoff_attempts WHERE trial_id = ? AND valid = 1",
+                (trial_id,),
+            ).fetchone():
+                raise ValueError("Writing cannot finish without a participant handoff")
             connection.execute(
                 """UPDATE study_tasks SET state = 'completed', verified_results_ready = 1
                    WHERE trial_id = ? AND agent_id = 'writing_agent'
@@ -786,7 +942,7 @@ class StudyRunner:
         runtime = self._runtime(connection, trial_id)
         phase, anchor = runtime["phase"], runtime["anchor_ms"]
         if phase == "running":
-            for index in range(runtime["next_index"], 5):
+            for index in range(runtime["next_index"], self._index(variant, "probe_dependency") + 1):
                 event = variant.trace[index]
                 due = anchor + event.offset_s * 1000
                 if now < due:
@@ -796,32 +952,33 @@ class StudyRunner:
                     "UPDATE study_trial_runtime SET next_index = ? WHERE trial_id = ?",
                     (index + 1, trial_id),
                 )
-                if index == 4:
+                if event.script_key == "probe_dependency":
                     connection.execute(
                         "UPDATE study_trial_runtime SET phase = 'probe' WHERE trial_id = ?",
                         (trial_id,),
                     )
                     break
         elif phase == "awaiting_pair":
-            first, second = variant.trace[5:7]
+            first = self._event(variant, "conflicting_definition" if variant.variant == "wine_1" else "conflicting_outlier_rule")
+            second = self._event(variant, "competing_completion")
             due = anchor + first.offset_s * 1000
             if now >= due:
                 cue = f"{trial_id}:paired-cue"
                 self._deliver(connection, trial_id, variant, first, due, now, cue_id=cue)
                 self._deliver(connection, trial_id, variant, second, due, now, cue_id=cue)
                 connection.execute(
-                    "UPDATE study_trial_runtime SET phase = 'blocker', next_index = 7 WHERE trial_id = ?",
-                    (trial_id,),
+                    "UPDATE study_trial_runtime SET phase = 'blocker', next_index = ? WHERE trial_id = ?",
+                    (self._index(variant, "blocker_feedback"), trial_id),
                 )
         elif phase in {"awaiting_approval", "awaiting_final"}:
-            index = 8 if phase == "awaiting_approval" else 10
+            index = self._index(variant, "overwrite_request" if variant.variant == "wine_1" else "publish_request") if phase == "awaiting_approval" else self._index(variant, "final_review")
             event = variant.trace[index]
             due = anchor + event.offset_s * 1000
             if now >= due:
                 self._deliver(connection, trial_id, variant, event, due, now)
                 connection.execute(
                     "UPDATE study_trial_runtime SET phase = ?, next_index = ? WHERE trial_id = ?",
-                    ("approval" if index == 8 else "final_review", index + 1, trial_id),
+                    ("approval" if phase == "awaiting_approval" else "final_review", index + 1, trial_id),
                 )
 
     @staticmethod
@@ -870,11 +1027,39 @@ class StudyRunner:
         ]
         delivered_ids = {event.event_id for event in events}
         records = [
-            ContentRecord(**{key: row[key] for key in ("record_id", "kind", "title", "text")})
+            ContentRecord(**{key: row[key] for key in ("record_id", "kind", "title", "text", "release_event_id")})
             for row in connection.execute(
                 "SELECT * FROM study_content WHERE trial_id = ? ORDER BY record_id", (trial.trial_id,)
             )
             if row["release_event_id"] is None or row["release_event_id"] in delivered_ids
+        ]
+        decisions = [
+            DecisionRecord(**dict(row))
+            for row in connection.execute(
+                """SELECT response.response_id, response.gate_event_id, event.task_id,
+                          response.response_order, option.label AS choice_label,
+                          response.reason, response.confidence, response.claim_text,
+                          response.responded_at_ms
+                   FROM study_responses AS response
+                   JOIN study_event_history AS event
+                     ON event.trial_id = response.trial_id
+                    AND event.event_id = response.gate_event_id
+                   JOIN study_action_options AS option
+                     ON option.trial_id = response.trial_id
+                    AND option.gate_event_id = response.gate_event_id
+                    AND option.choice_id = response.choice_id
+                   WHERE response.trial_id = ? AND event.task_id IS NOT NULL
+                   ORDER BY response.responded_at_ms, response.rowid""",
+                (trial.trial_id,),
+            )
+        ]
+        handoff_attempts = [
+            HandoffAttempt(**dict(row))
+            for row in connection.execute(
+                """SELECT attempt_id, source_id, payload, valid, feedback, sent_at_ms
+                   FROM study_handoff_attempts WHERE trial_id = ? ORDER BY rowid""",
+                (trial.trial_id,),
+            )
         ]
         tasks = [
             TaskRecord(
@@ -898,9 +1083,9 @@ class StudyRunner:
             )
         ]
         active_gate = {
-            "blocker": variant.trace[5].event_id,
-            "approval": variant.trace[8].event_id,
-            "final_review": variant.trace[10].event_id,
+            "blocker": self._event(variant, "conflicting_definition" if variant.variant == "wine_1" else "conflicting_outlier_rule").event_id,
+            "approval": self._event(variant, "overwrite_request" if variant.variant == "wine_1" else "publish_request").event_id,
+            "final_review": self._event(variant, "final_review").event_id,
         }.get(runtime["phase"])
         actions = (
             [ActionOption(**dict(row)) for row in connection.execute(
@@ -910,8 +1095,9 @@ class StudyRunner:
             if active_gate else []
         )
         correction_gate = {
-            "awaiting_approval": variant.trace[5].event_id,
-            "awaiting_final": variant.trace[8].event_id,
+            "handoff": self._event(variant, "conflicting_definition" if variant.variant == "wine_1" else "conflicting_outlier_rule").event_id,
+            "awaiting_approval": self._event(variant, "conflicting_definition" if variant.variant == "wine_1" else "conflicting_outlier_rule").event_id,
+            "awaiting_final": self._event(variant, "overwrite_request" if variant.variant == "wine_1" else "publish_request").event_id,
         }.get(runtime["phase"])
         correction_options = []
         correction_previous_choice_label = None
@@ -931,7 +1117,7 @@ class StudyRunner:
                 first is not None
                 and corrected is None
                 and (
-                    (runtime["phase"] == "awaiting_approval" and first["choice_id"] != variant.sources[0].source_id)
+                    (runtime["phase"] in {"handoff", "awaiting_approval"} and first["choice_id"] != variant.sources[0].source_id)
                     or (runtime["phase"] == "awaiting_final" and first["choice_id"] != "reject")
                 )
             )
@@ -963,6 +1149,8 @@ class StudyRunner:
             confirmed_agents=confirmed_agents,
             records=records,
             events=events,
+            decisions=decisions,
+            handoff_attempts=handoff_attempts,
             action_options=actions,
             correction_options=correction_options,
             correction_for_event_id=correction_gate if correction_options else None,

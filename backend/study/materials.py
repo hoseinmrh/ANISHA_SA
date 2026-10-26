@@ -16,7 +16,8 @@ from backend.study.setup import MATERIALS_DIR
 SCENARIO_PATH = MATERIALS_DIR / "scenario_stimuli.md"
 TRACE_PATH = MATERIALS_DIR / "event_trace.csv"
 ARTIFACT_DIR = MATERIALS_DIR / "final_artifacts"
-TRACE_COLUMNS = ("variant", "event_id", "trigger", "offset_s", "gate", "script_key", "notes")
+TRACE_COLUMNS = ("trace_version", "variant", "event_id", "trigger", "offset_s", "gate", "script_key", "notes")
+TRACE_VERSION = "condition-c-0.6"
 VARIANTS = {1: "wine_1", 2: "wine_2"}
 FEEDBACK_KEYS = {"blocker_feedback", "approval_feedback"}
 
@@ -29,6 +30,7 @@ class SourceCard(BaseModel):
 
 
 class EventSpec(BaseModel):
+    trace_version: str = "draft 0.4"  # Existing trial snapshots predate the trace-version column.
     variant: str
     event_id: str
     trigger: str
@@ -97,7 +99,7 @@ def _source_cards(section: str, variant_number: int) -> list[SourceCard]:
                 source_id=match.group(1),
                 title=match.group(2),
                 text=_quote_after(section, match.group(0)),
-                release_gate="final_review" if match.group(1).endswith("S3") else "briefing",
+                release_gate="coding_complete" if match.group(1).endswith("S3") else "briefing",
             )
         )
     return cards
@@ -136,6 +138,8 @@ def _feedback(text: str) -> dict[str, str]:
         "blocker_wrong": "- If blocker answer is wrong or unclear:",
         "approval_rejected": "- If approval is rejected:",
         "approval_approved_or_deferred": "- If approval is approved or deferred:",
+        "handoff_invalid": "- If handoff send is invalid:",
+        "handoff_valid": "- If handoff send is valid:",
     }
     feedback = {}
     for key, prefix in prefixes.items():
@@ -160,6 +164,8 @@ def load_study_materials(
     version_match = re.search(r"^# Frozen wine scenario stimuli — (.+)$", scenario, re.MULTILINE)
     if version_match is None:
         raise ValueError("Scenario materials need a versioned heading")
+    if version_match.group(1) != TRACE_VERSION:
+        raise ValueError("Scenario and Condition C trace versions differ")
     common = _section(
         scenario,
         "## Common participant instruction before either variant",
@@ -174,6 +180,8 @@ def load_study_materials(
     traces = {variant: [] for variant in VARIANTS.values()}
     seen_ids = set()
     for row in reader:
+        if row["trace_version"] != TRACE_VERSION:
+            raise ValueError(f"Unexpected trace version for {row['event_id']}")
         if row["variant"] not in traces:
             raise ValueError(f"Unknown trace variant: {row['variant']}")
         if row["event_id"] in seen_ids:
@@ -191,6 +199,7 @@ def load_study_materials(
             raise ValueError(f"Negative offset for {row['event_id']}")
         traces[row["variant"]].append(
             EventSpec(
+                trace_version=row["trace_version"],
                 variant=row["variant"],
                 event_id=row["event_id"],
                 trigger=row["trigger"],
@@ -201,9 +210,19 @@ def load_study_materials(
             )
         )
     for number, variant in VARIANTS.items():
-        expected_ids = [f"W{number}_{index:02d}" for index in range(11)]
+        expected_ids = [f"W{number}_{index:02d}" for index in range(13)]
         if [event.event_id for event in traces[variant]] != expected_ids:
             raise ValueError(f"Trace for {variant} must contain ordered events {expected_ids}")
+        completion = traces[variant][8]
+        if (completion.script_key, completion.trigger, completion.offset_s, completion.gate) != (
+            "coding_complete", "blocker_response", 0, False
+        ):
+            raise ValueError(f"{variant} must release verified Coding output at the blocker response")
+        request = traces[variant][9]
+        if (request.script_key, request.trigger, request.offset_s, request.gate) != (
+            "writing_requests_result", "blocker_response", 0, True
+        ):
+            raise ValueError(f"{variant} must ask for participant handoff at Coding completion")
 
     variants = {}
     scenario_digest = hashlib.sha256()

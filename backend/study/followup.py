@@ -62,7 +62,10 @@ def resolve_followup(intent: ExtractedIntent, state: TrialSnapshot, agent_id: st
 
     if intent.intent == Intent.REQUEST_DETAILS:
         records = [record for record in state.records if (
-            record.kind in {"source", "instruction"}
+            record.kind == "instruction"
+            or record.kind == "source" and (
+                agent_id == "coding_agent" or not record.record_id.endswith("-S3")
+            )
             or agent_id == "coding_agent" and record.kind == "code_artifact"
             or agent_id == "writing_agent" and record.kind in {"draft_preview", "report_excerpt", "markdown_artifact"}
         )]

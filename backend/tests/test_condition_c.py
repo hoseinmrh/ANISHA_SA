@@ -8,6 +8,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend import main
+from backend.study.followup import resolve_followup
 from backend.study.runner import StudyRunner
 from backend.study.setup import StudySetupStore
 from backend.voice.intent import ExtractedIntent, Intent, IntentParameters, RequestedInformation
@@ -58,7 +59,10 @@ class ConditionCFlowTest(unittest.TestCase):
         self.researcher = {"X-ANISHA-Researcher-Token": "research-test"}
 
     def call(self, method, path, *, headers=None, **kwargs):
-        response = self.client.request(method, path, headers=headers or self.participant, **kwargs)
+        request_headers = dict(headers or self.participant)
+        if "content" in kwargs:
+            request_headers.setdefault("Content-Type", "application/octet-stream")
+        response = self.client.request(method, path, headers=request_headers, **kwargs)
         self.assertLess(response.status_code, 400, response.text)
         return response.json()
 
@@ -95,6 +99,8 @@ class ConditionCFlowTest(unittest.TestCase):
         masked = self.call("GET", base + "/state")
         self.assertTrue(masked["masked"])
         self.assertEqual(masked["events"], [])
+        self.assertEqual(masked["conversation"], [])
+        self.assertEqual(masked["decisions"], [])
         self.call("POST", f"/study/researcher/trials/{trial_id}/probe", headers=self.researcher,
                   json={"reason": "participant state answer"})
         self.clock[0] += 45_000
@@ -113,14 +119,41 @@ class ConditionCFlowTest(unittest.TestCase):
         answer = self.call("POST", base + "/responses", json={
             "choice_id": pair["action_options"][1]["choice_id"], "reason": "My first choice", "confidence": 60,
         })
-        self.assertEqual(answer["phase"], "awaiting_approval")
+        self.assertEqual(answer["phase"], "handoff")
+        completion = next(event for event in answer["events"] if "analysis is complete and verified" in event["text"])
+        self.assertEqual(completion["occurred_at_ms"], self.clock[0])
+        self.assertEqual(next(event for event in self.runner.snapshot(trial_id).events
+                              if event.event_id == completion["event_id"]).scheduled_at_ms, self.clock[0])
+        self.assertTrue(completion["cue_id"])
+        self.assertEqual(completion["task_id"], f"{trial_id}:coding")
+        self.assertEqual(next(task for task in answer["tasks"] if task["agent_id"] == "coding_agent")["state"], "completed")
+        self.assertEqual(next(task for task in answer["tasks"] if task["agent_id"] == "writing_agent")["state"], "waiting_for_result_transfer")
+        self.assertIn("V1-S3", {record["record_id"] for record in answer["records"]})
+        self.assertIn("wine_1-final-code", {record["record_id"] for record in answer["records"]})
+        self.assertNotIn("wine_1-final-markdown", {record["record_id"] for record in answer["records"]})
+        self.assertEqual(next(record for record in answer["records"] if record["record_id"] == "V1-S3")["release_event_id"], completion["event_id"])
+        self.assertEqual(answer["decisions"][0]["choice_label"], "Use rule from V1-S2")
+        self.assertEqual(answer["decisions"][0]["reason"], "My first choice")
         if answer["correction_options"]:
             corrected = self.call("POST", base + "/corrections", json={
                 "choice_id": answer["correction_options"][0]["choice_id"],
                 "reason": "I checked the newer instruction",
             })
-            self.assertEqual(corrected["phase"], "awaiting_approval")
+            self.assertEqual(corrected["phase"], "handoff")
         self.clock[0] += 90_000
+        self.assertEqual(self.call("GET", base + "/state")["phase"], "handoff")
+        invalid = self.call("POST", base + "/handoff", json={"payload": "incomplete result"})
+        self.assertEqual(invalid["phase"], "handoff")
+        self.assertEqual(invalid["handoff_attempts"][0]["payload"], "incomplete result")
+        self.assertFalse(invalid["handoff_attempts"][0]["valid"])
+        source = next(record for record in answer["records"] if record["record_id"] == "V1-S3")
+        self.call("POST", base + "/interactions", json={
+            "event_type": "result_copy", "target_id": source["record_id"], "ui_layer": "coding_agent_chat",
+        })
+        received = self.call("POST", base + "/handoff", json={"payload": source["text"]})
+        self.assertEqual(received["phase"], "approval")
+        self.assertEqual(received["handoff_attempts"][1]["source_id"], "V1-S3")
+        self.assertTrue(received["handoff_attempts"][1]["valid"])
         approval = self.call("GET", base + "/state")
         self.assertEqual(approval["phase"], "approval")
         self.assertTrue(any(record["kind"] == "draft_preview" for record in approval["records"]))
@@ -141,6 +174,7 @@ class ConditionCFlowTest(unittest.TestCase):
         self.assertEqual(len(export["condition_c_voice_attempts"]), 2)
         self.assertEqual(len(export["condition_c_proposals"]), 2)
         self.assertEqual(len([row for row in export["responses"] if row["response_order"] == 1]), 4)
+        self.assertEqual(len(export["handoff_attempts"]), 2)
 
     def test_second_wine_variant_starts_after_both_agents(self):
         created = self.call("POST", "/study/researcher/trials", headers=self.researcher,
@@ -155,12 +189,50 @@ class ConditionCFlowTest(unittest.TestCase):
         self.assertEqual(second.phase, "running")
         self.assertEqual(len(second.events), 1)
         self.assertEqual({task.goal for task in second.tasks}, {"Coding variant two", "Writing variant two"})
+        self.clock[0] += 220_000
+        self.assertEqual(self.runner.snapshot(trial_id).phase, "probe")
+        self.runner.respond(trial_id, main.GateAnswer(reason="Writing waits for Coding"))
+        self.clock[0] += 45_000
+        pair = self.runner.snapshot(trial_id)
+        self.assertEqual(pair.phase, "blocker")
+        self.assertNotIn("V2-S3", {record.record_id for record in pair.records})
+        completed = self.runner.respond(trial_id, main.GateAnswer(
+            choice_id="V2-S1", reason="Use the latest rule", confidence=85))
+        self.assertEqual(completed.phase, "handoff")
+        self.assertIn("V2-S3", {record.record_id for record in completed.records})
+        self.assertIn("wine_2-final-code", {record.record_id for record in completed.records})
+        self.assertNotIn("wine_2-final-markdown", {record.record_id for record in completed.records})
+        evidence = ExtractedIntent(intent=Intent.REQUEST_DETAILS, parameters=IntentParameters(
+            requested_information=RequestedInformation.EVIDENCE))
+        self.assertIn("V2-S3", resolve_followup(evidence, completed, "coding_agent").result.record_ids)
+        self.assertNotIn("V2-S3", resolve_followup(evidence, completed, "writing_agent").result.record_ids)
+        self.clock[0] += 30_000
+        source_text = next(record.text for record in completed.records if record.record_id == "V2-S3")
+        received = self.runner.send_handoff(trial_id, main.HandoffSend(payload=source_text))
+        self.assertEqual(received.phase, "awaiting_approval")
+        self.assertEqual(received.due_at_ms, self.clock[0] + 60_000)
 
     def test_single_digit_slot_is_normalized_before_allocation(self):
         created = self.call("POST", "/study/researcher/trials", headers=self.researcher,
                             json={"participant_id": "p-slot", "slot": "2", "period": 1})
         self.assertEqual(created["trial"]["slot"], "02")
         self.assertEqual(created["trial"]["condition"], "condition_c")
+
+    def test_trial_uses_its_material_snapshot_after_application_or_source_edits(self):
+        created = self.call("POST", "/study/researcher/trials", headers=self.researcher,
+                            json={"participant_id": "p-fixed", "slot": "02", "period": 1})
+        trial_id = created["trial"]["trial_id"]
+        self.participant = {"X-ANISHA-Study-Token": main.participant_token(trial_id)}
+        base = f"/study/trials/{trial_id}"
+        original_brief = self.call("GET", base + "/state")["participant_brief"]
+        with patch("backend.study.materials.load_study_materials",
+                   side_effect=ValueError("The disk materials changed")), \
+             patch("backend.study.build.current_build_hash", return_value="new-app-build"):
+            restored = self.call("GET", base + "/state")
+            self.assertEqual(restored["participant_brief"], original_brief)
+            self.assertTrue(self.call("POST", base + "/interactions", json={
+                "event_type": "agent_switch", "target_id": "coding_agent", "ui_layer": "agent_tabs",
+            })["is_new"])
 
     def test_selected_agent_followup_uses_same_speech_and_logs_repairs(self):
         created = self.call("POST", "/study/researcher/trials", headers=self.researcher,
@@ -195,6 +267,54 @@ class ConditionCFlowTest(unittest.TestCase):
                              ["used_as_recognized", "reviewed"])
             self.assertEqual(export["condition_c_followups"][0]["intent_model"], "gpt-5.6-luna")
             self.assertEqual(self.call("GET", base + "/state")["phase"], "running")
+
+    def test_conversations_restore_per_agent_and_start_empty_in_each_new_trial(self):
+        first = self.call("POST", "/study/researcher/trials", headers=self.researcher,
+                          json={"participant_id": "same-person", "slot": "02", "period": 1})
+        first_id = first["trial"]["trial_id"]
+        self.participant = {"X-ANISHA-Study-Token": main.participant_token(first_id)}
+        base = f"/study/trials/{first_id}"
+        self.assertEqual(self.call("GET", base + "/state")["conversation"], [])
+
+        for agent in ("coding_agent", "writing_agent"):
+            activation = self.call("POST", f"{base}/agents/{agent}/speech/activations")
+            heard = self.call("POST", f"{base}/agents/{agent}/speech",
+                              params={"activation_id": activation["transcription_id"]},
+                              content=b"a" * 64)
+            proposal = self.call("POST", f"{base}/agents/{agent}/proposals", json={
+                "transcription_id": heard["transcription_id"],
+                "reviewed_transcript": f"Brief {agent}",
+            })
+            pending = self.call("GET", base + "/state")["pending_briefings"][agent]
+            self.assertEqual(pending["proposal"]["proposal_id"], proposal["proposal_id"])
+            self.call("POST", f"{base}/agents/{agent}/proposals/{proposal['proposal_id']}/confirm",
+                      json={"goal": f"Confirmed {agent} goal"})
+
+        with patch.object(main, "get_intent_extractor", return_value=FakeIntentExtractor()):
+            for agent in ("coding_agent", "writing_agent"):
+                activation = self.call("POST", f"{base}/agents/{agent}/speech/activations",
+                                       params={"purpose": "followup"})
+                self.call("POST", f"{base}/agents/{agent}/speech",
+                          params={"purpose": "followup", "activation_id": activation["transcription_id"]},
+                          content=b"a" * 64)
+                self.call("POST", f"{base}/agents/{agent}/followups",
+                          json={"transcription_id": activation["transcription_id"]})
+
+        restored = self.call("GET", base + "/state")
+        self.assertEqual(len(restored["conversation"]), 4)
+        for agent in ("coding_agent", "writing_agent"):
+            own = [item for item in restored["conversation"] if item["agent_id"] == agent]
+            self.assertEqual([item["kind"] for item in own], ["briefing", "followup"])
+            self.assertEqual(own[0]["goal"], f"Confirmed {agent} goal")
+            self.assertTrue(own[1]["message"])
+
+        second = self.call("POST", "/study/researcher/trials", headers=self.researcher,
+                           json={"participant_id": "same-person", "slot": "02", "period": 1})
+        self.participant = {"X-ANISHA-Study-Token": main.participant_token(second["trial"]["trial_id"])}
+        fresh = self.call("GET", f"/study/trials/{second['trial']['trial_id']}/state")
+        self.assertEqual(fresh["conversation"], [])
+        self.assertEqual(fresh["pending_briefings"], {})
+        self.assertEqual(fresh["pending_followups"], {})
 
     def test_followup_microphone_hidden_at_probe(self):
         created = self.call("POST", "/study/researcher/trials", headers=self.researcher,

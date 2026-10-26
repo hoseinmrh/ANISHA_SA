@@ -1,4 +1,4 @@
-# Frozen wine scenario stimuli — draft 0.4
+# Frozen wine scenario stimuli — condition-c-0.6
 
 Use one variant per condition according to `counterbalancing.csv`. The study runner displays the same project facts and source records in Full ANISHA and Condition C; their voice-entry structure and organisation differ. Delegation starts with natural speech in both modes. The same speech-recognition service creates a reviewable transcript, and a deterministic mapper converts the participant-approved wording to the fixed Coding and Writing proposal. The researcher never paraphrases a source rule or hints at a correct answer. This is simulated project information, not a real analysis of the wine dataset.
 
@@ -50,7 +50,7 @@ The experiment does not require a verbatim phrase: participant wording, activati
 
 > For an exploratory chart, high quality was defined as above this sample's median. This was a draft definition and has not been reconfirmed.
 
-**Source V1-S3 — verified analysis summary (available with final artefact):**
+**Source V1-S3 — verified analysis summary (released at Coding completion):**
 
 > Coding completed the planned descriptive analysis using score ≥ 7 as the high-quality rule. The checked output reports associations between alcohol, volatile acidity, and quality. No causal design or intervention was used.
 
@@ -75,7 +75,7 @@ The experiment does not require a verbatim phrase: participant wording, activati
 
 > For a preliminary clean-up, remove the top and bottom one percent before analysis. This draft rule has not been reconfirmed.
 
-**Source V2-S3 — verified analysis summary (available with final artefact):**
+**Source V2-S3 — verified analysis summary (released at Coding completion):**
 
 > Coding verified that the extreme values are plausible and retained them in the planned analysis. The reported test for volatile acidity has p = .18. The project rule is p < .05.
 
@@ -88,17 +88,27 @@ The experiment does not require a verbatim phrase: participant wording, activati
 
 ### Fixed final review files
 
-At the final-review event, release the matching Coding script and Writing
-Markdown report from `final_artifacts/`. Variant 1 uses `wine_1_analysis.py`
-and `wine_1_report.md`; variant 2 uses `wine_2_analysis.py` and
-`wine_2_report.md`. These are fixed study review files, not live agent output.
-The Markdown report contains the exact final report excerpt below. Both files
-remain visible after the participant saves the final answer. File contents are
-included in the scenario checksum recorded with each trial.
+At the Coding-completion event, release the matching verified summary (V1-S3
+or V2-S3) and Coding script from `final_artifacts/` in Coding's conversation.
+Variant 1 uses `wine_1_analysis.py`; variant 2 uses `wine_2_analysis.py`.
+Writing's results section remains waiting for the verified Coding result.
+At final review, release the matching Writing Markdown report:
+`wine_1_report.md` or `wine_2_report.md`. These are fixed study review files,
+not live agent output. The Markdown report contains the exact final report
+excerpt below. Released files remain visible after the final answer. File
+contents are included in the scenario checksum recorded with each trial.
 
 ## Fixed event copy
 
-The event IDs and timing are in `event_trace.csv`. Routine events update the relevant status screen silently. At the blocker pair, use **one identical device cue** in both conditions. In Full ANISHA the blocker is the foreground attention item and the routine Writing completion is in history; in Condition C each agent's chronological feed shows its own item. Do not change the content or underlying time.
+The event IDs and timing for this Condition C version are in `event_trace.csv`.
+Routine events update the relevant status screen silently. At the blocker pair,
+use one device cue for the two co-present items. The 45-second offset is from
+the probe response to that pair. After the first blocker response and fixed
+feedback, scripted Coding completes and its verified result is released at a
+zero-second offset with one Coding cue. There is no post-blocker wait. The
+approval request is due no earlier than 90 seconds after the blocker response
+and only after Writing receives a valid participant send. No result is inserted
+into Writing automatically.
 
 | Script key | Variant 1 copy | Variant 2 copy |
 | --- | --- | --- |
@@ -106,9 +116,11 @@ The event IDs and timing are in `event_trace.csv`. Routine events update the rel
 | `validation_progress` | “Coding: dataset opened; validation in progress.” | Same text. |
 | `outline_complete` | “Writing: report outline complete. Results section waiting for verified Coding output.” | Same text. |
 | `analysis_started` | “Coding: validation passed; analysis in progress.” | Same text. |
-| `probe_dependency` | Display blanked; researcher asks the exact state question in `questionnaire_packet.md`. | Same procedure and question. |
+| `probe_dependency` | Display blanked; researcher asks the exact state question in the questionnaire appendix of `Deliverables/ANISHA_Study_Plan.tex`. | Same procedure and question. |
 | `conflicting_definition` / `conflicting_outlier_rule` | “Coding blocked. The old note says high quality is above the sample median; the latest supervisor instruction says score ≥ 7. Which rule should Coding use? You may inspect both sources.” | “Coding blocked. The old note says remove the top and bottom one percent; the latest supervisor instruction says retain verified plausible extremes. Which rule should Coding use? You may inspect both sources.” |
 | `competing_completion` | “Writing: title page and formatting pass complete. Results still waiting for Coding.” | Same text. |
+| `coding_complete` | “Coding: the analysis is complete and verified. Open V1-S3 and the Coding script to review the result. Writing's results section is waiting for this verified result.” | “Coding: the analysis is complete and verified. Open V2-S3 and the Coding script to review the result. Writing's results section is waiting for this verified result.” |
+| `writing_requests_result` | “I have finished the outline. Please open Coding's verified analysis result and send it to me here so I can finish the results section.” | Same text. |
 | `overwrite_request` / `publish_request` | “Approval requested: overwrite the original report with this draft. Approve, reject, or defer? Give a brief reason.” | “Approval requested: publish the draft summary before review. Approve, reject, or defer? Give a brief reason.” |
 | `final_review` | “Final review: see the report excerpt and verified analysis source. Identify any claim requiring correction and decide whether the report is ready to accept. Give a brief reason.” | Same instruction. |
 
@@ -129,6 +141,16 @@ At each gate, save the participant's first response and their confidence before 
 - If approval is rejected: “The prohibited action was not executed. Work continues as a review draft.”
 - If approval is approved or deferred: after saving first choice and confidence, show “This request conflicts with a project constraint. No external action was executed. You may correct your answer once.” Save any correction separately. Deferral is safe but incomplete for the first-response rubric because the stated constraint already rules out the action.
 - After final answer: do not confirm correctness until the post-condition questionnaires and both conditions are finished.
+
+For the Condition C handoff, Writing accepts the complete verified V1-S3 or
+V2-S3 summary text. The first and subsequent submitted payloads are preserved.
+An incomplete or different payload receives the fixed clarification below. A
+valid send receives the fixed receipt below. No result appears in Writing's
+conversation until the participant sends it. There is no automatic transfer or
+timeout transfer in this version.
+
+- If handoff send is invalid: “I still need Coding's verified analysis result. Please check the verified source in Coding and send the complete result here.”
+- If handoff send is valid: “I received Coding's verified analysis result. I can continue the results section.”
 
 No actual file overwrite, publication, merge, package installation, or network side effect is possible in any branch. The fixed final artefact appears in every branch, so later task difficulty does not depend on earlier correctness.
 
